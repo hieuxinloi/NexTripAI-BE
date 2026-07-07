@@ -2,6 +2,17 @@
 
 Backend service for NexTripAI. This repo owns the API layer, AI agent orchestration, user/session data, and integration with the Knowledge Base, Maps, Weather, and Frontend.
 
+## Workflow Documentation
+
+Read this before implementation:
+
+- Repo workflow: [docs/WORKFLOW.md](docs/WORKFLOW.md)
+- System workflow: [../docs/WORKFLOW.md](../docs/WORKFLOW.md)
+- Repo structure guide: [../docs/REPO_STRUCTURE.md](../docs/REPO_STRUCTURE.md)
+- Step-by-step roadmap: [../docs/IMPLEMENTATION_STEPS.md](../docs/IMPLEMENTATION_STEPS.md)
+
+This backend should be local-first: FastAPI for APIs, LangGraph for the agent workflow, and HTTP clients for KB/weather integrations. Do not copy Azure/Foundry/Teams infrastructure from the reference Orchestrator project.
+
 ## Main Responsibilities
 
 - Expose REST/WebSocket APIs for the frontend chat and trip planning flows.
