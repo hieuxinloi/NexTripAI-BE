@@ -11,7 +11,7 @@ class ChatRequest(BaseModel):
     city: str | None = None
     entity_types: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
-    kb_version: Literal["v1", "v2"] = "v1"
+    kb_version: Literal["v1", "v2", "v3"] = "v1"
 
 
 class EvidenceItem(BaseModel):
@@ -29,7 +29,7 @@ class EvidenceItem(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     intent: str = "kb_retrieval"
-    kb_version: Literal["v1", "v2"] = "v1"
+    kb_version: Literal["v1", "v2", "v3"] = "v1"
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)

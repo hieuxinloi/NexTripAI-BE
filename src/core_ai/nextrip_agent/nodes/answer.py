@@ -27,9 +27,9 @@ def answer_node(state: NexTripAgentState) -> NexTripAgentState:
     missing_fields = list(state.get("missing_fields") or [])
     if missing_fields:
         answer = f"Mình cần bạn bổ sung: {', '.join(missing_fields)}."
-    elif state.get("kb_version") == "v2" and facts:
+    elif state.get("kb_version") in {"v2", "v3"} and facts:
         answer = _format_typed_facts(evidence, facts, state.get("kb_version") or "v2")
-    elif state.get("kb_version") == "v2" and state.get("answer_type") == "entity_detail":
+    elif state.get("kb_version") in {"v2", "v3"} and state.get("answer_type") == "entity_detail":
         answer = "Không tìm thấy địa điểm khớp đủ tin cậy trong Knowledge Base V2."
     elif not evidence:
         answer = (

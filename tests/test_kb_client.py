@@ -41,3 +41,18 @@ def test_kb_client_calls_v2_query_contract() -> None:
     assert captured["path"] == "/api/kb/query"
     assert '"kb_version":"v2"' in captured["body"]
     client.close()
+
+
+def test_kb_client_calls_v3_query_contract() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.read().decode()
+        return httpx.Response(200, json={"kb_version": "v3", "entities": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    kb_client = KbClient("http://kb.test", client=client)
+    kb_client.query_v2(query="hotel 5 sao", top_k=5, kb_version="v3")
+
+    assert '"kb_version":"v3"' in captured["body"]
+    client.close()

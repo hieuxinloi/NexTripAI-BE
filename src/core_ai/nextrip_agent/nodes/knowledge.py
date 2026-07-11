@@ -115,7 +115,7 @@ def _execute_plan(
 
 
 def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> NexTripAgentState:
-    if state.get("kb_version") == "v2":
+    if state.get("kb_version") in {"v2", "v3"}:
         return _knowledge_v2(state, kb_client)
     trace = list(state.get("trace") or [])
     evidence: list[dict] = []
