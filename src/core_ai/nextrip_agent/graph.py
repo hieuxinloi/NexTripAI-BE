@@ -43,6 +43,7 @@ def run_nextrip_agent(
         answer=state.get("answer") or "",
         evidence=list(state.get("evidence") or []),
         trace=list(state.get("trace") or []),
+        error=state.get("error"),
     )
     logger.info(
         "NexTrip agent end session_id={} evidence_count={} trace_events={} elapsed_ms={}",

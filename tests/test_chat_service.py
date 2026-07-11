@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from threading import Barrier
+
 from src.apis.domains.chat.service import infer_top_k
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 
@@ -31,6 +33,16 @@ class FakeKbClient:
         }
 
 
+class ParallelFakeKbClient(FakeKbClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.barrier = Barrier(2, timeout=1)
+
+    def search(self, **kwargs):
+        self.barrier.wait()
+        return super().search(**kwargs)
+
+
 def test_nextrip_agent_uses_kb_evidence() -> None:
     fake_kb = FakeKbClient()
     result = run_nextrip_agent(
@@ -47,7 +59,7 @@ def test_nextrip_agent_uses_kb_evidence() -> None:
 
 
 def test_nextrip_agent_splits_multi_entity_counts() -> None:
-    fake_kb = FakeKbClient()
+    fake_kb = ParallelFakeKbClient()
     result = run_nextrip_agent(
         message="Goi y 3 quan cafe va 5 nha hang o Quy Nhon",
         session_id="test-session",
@@ -56,11 +68,13 @@ def test_nextrip_agent_splits_multi_entity_counts() -> None:
         top_k=3,
         kb_client=fake_kb,
     )
-    assert fake_kb.calls == [
+    assert sorted(fake_kb.calls, key=lambda item: item["top_k"]) == [
         {"query": "cafe o Quy Nhon", "entity_types": ["cafe"], "top_k": 3},
         {"query": "nha hang o Quy Nhon", "entity_types": ["restaurant"], "top_k": 5},
     ]
     assert len(result.evidence) == 8
+    assert result.evidence[0]["entity_type"] == "cafe"
+    assert result.evidence[3]["entity_type"] == "restaurant"
 
 
 def test_infer_top_k_from_message() -> None:

@@ -5,12 +5,15 @@ from time import perf_counter
 from loguru import logger
 
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
-from src.config import settings
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.infra.kb_client import KbClient
 
 DEFAULT_TOP_K = 5
 MAX_INFERRED_TOP_K = 10
+
+
+class KnowledgeBaseUnavailableError(RuntimeError):
+    pass
 
 
 def infer_top_k(message: str) -> int:
@@ -20,7 +23,7 @@ def infer_top_k(message: str) -> int:
     return DEFAULT_TOP_K
 
 
-def handle_chat(request: ChatRequest) -> ChatResponse:
+def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
     started_at = perf_counter()
     top_k = request.top_k if request.top_k is not None else infer_top_k(request.message)
     logger.info(
@@ -31,7 +34,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         top_k,
         len(request.message),
     )
-    kb_client = KbClient(settings().nextrip_kb_base_url)
     agent_result = run_nextrip_agent(
         message=request.message,
         session_id=request.session_id,
@@ -40,6 +42,8 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         top_k=top_k,
         kb_client=kb_client,
     )
+    if agent_result.error:
+        raise KnowledgeBaseUnavailableError(agent_result.error["message"])
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
     logger.info(
         "Chat turn end session_id={} evidence_count={} result_ids={} answer_len={} elapsed_ms={}",

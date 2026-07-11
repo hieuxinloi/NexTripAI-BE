@@ -15,3 +15,4 @@ class AgentResult(BaseModel):
     answer: str
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
+    error: dict[str, Any] | None = None

@@ -31,4 +31,4 @@ def intent_node(state: NexTripAgentState) -> NexTripAgentState:
         len(plan_payload),
         plan_payload,
     )
-    return {**state, "retrieval_plan": plan_payload, "trace": trace}
+    return {**state, "retrieval_plan": retrieval_plan, "trace": trace}

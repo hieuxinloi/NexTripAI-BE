@@ -11,8 +11,14 @@ from src.shared.request_context import current_request_id
 
 
 class KbClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, client: httpx.Client | None = None):
         self.base_url = base_url.rstrip("/")
+        self._client = client if client is not None else httpx.Client(trust_env=False)
+        self._owns_client = client is None
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
 
     def search(
         self,
@@ -57,14 +63,14 @@ class KbClient:
             payload.get("top_k"),
         )
         try:
-            with httpx.Client(timeout=timeout) as client:
-                response = client.post(
-                    f"{self.base_url}{path}",
-                    json=payload,
-                    headers={"X-Request-ID": current_request_id()},
-                )
-                response.raise_for_status()
-                data = response.json()
+            response = self._client.post(
+                f"{self.base_url}{path}",
+                json=payload,
+                headers={"X-Request-ID": current_request_id()},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
         except Exception as exc:
             logger.exception(
                 "KB client request error path={} error_type={} elapsed_ms={}",
