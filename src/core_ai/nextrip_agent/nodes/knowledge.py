@@ -24,6 +24,9 @@ class SupportsKbSearch(Protocol):
     ) -> dict:
         ...
 
+    def query_v2(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict:
+        ...
+
 
 @dataclass(frozen=True)
 class SearchOutcome:
@@ -112,6 +115,8 @@ def _execute_plan(
 
 
 def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> NexTripAgentState:
+    if state.get("kb_version") == "v2":
+        return _knowledge_v2(state, kb_client)
     trace = list(state.get("trace") or [])
     evidence: list[dict] = []
     retrieval_plan = state["retrieval_plan"]
@@ -160,6 +165,75 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
             "error": {
                 "code": "kb_unavailable",
                 "message": "Knowledge Base is temporarily unavailable.",
+                "retryable": True,
+            },
+            "trace": trace,
+        }
+
+
+def _knowledge_v2(
+    state: NexTripAgentState,
+    kb_client: SupportsKbSearch,
+) -> NexTripAgentState:
+    trace = list(state.get("trace") or [])
+    started_at = perf_counter()
+    try:
+        query = _query_with_city(state["message"], state.get("city"))
+        payload = kb_client.query_v2(
+            query=query,
+            top_k=state["top_k"],
+            kb_version=state.get("kb_version") or "v2",
+        )
+        evidence = list(payload.get("recommendations") or payload.get("entities") or [])
+        source = next(iter(payload.get("evidence") or []), None)
+        if source:
+            source_info = {
+                "name": source.get("source_name"),
+                "url": source.get("url"),
+            }
+            evidence = [{**item, "source": source_info} for item in evidence]
+        trace.extend(payload.get("trace") or [])
+        trace.append(
+            {
+                "node": "knowledge",
+                "status": "completed",
+                "kb_version": state.get("kb_version") or "v2",
+                "query": query,
+                "count": len(evidence),
+                "fact_count": len(payload.get("facts") or []),
+                "elapsed_ms": int((perf_counter() - started_at) * 1000),
+            }
+        )
+        return {
+            **state,
+            "answer_type": payload.get("answer_type") or "kb_retrieval",
+            "evidence": evidence,
+            "facts": list(payload.get("facts") or []),
+            "missing_fields": list(payload.get("missing_fields") or []),
+            "trace": trace,
+        }
+    except Exception as exc:
+        logger.exception(
+            "NexTrip node knowledge V2 error session_id={} error_type={}",
+            state.get("session_id") or "-",
+            exc.__class__.__name__,
+        )
+        trace.append(
+            {
+                "node": "knowledge",
+                "status": "error",
+                "kb_version": state.get("kb_version") or "v2",
+                "error_type": exc.__class__.__name__,
+                "message": str(exc),
+            }
+        )
+        return {
+            **state,
+            "evidence": [],
+            "facts": [],
+            "error": {
+                "code": "kb_unavailable",
+                "message": "Knowledge Base V2 is temporarily unavailable.",
                 "retryable": True,
             },
             "trace": trace,

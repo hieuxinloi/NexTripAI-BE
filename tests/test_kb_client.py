@@ -24,3 +24,20 @@ def test_kb_client_reuses_injected_connection_pool() -> None:
     assert request_count == 2
     assert not shared_http_client.is_closed
     shared_http_client.close()
+
+
+def test_kb_client_calls_v2_query_contract() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = request.read().decode()
+        return httpx.Response(200, json={"kb_version": "v2", "entities": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    kb_client = KbClient("http://kb.test", client=client)
+    kb_client.query_v2(query="Mỹ Khê ở đâu?", top_k=5)
+
+    assert captured["path"] == "/api/kb/query"
+    assert '"kb_version":"v2"' in captured["body"]
+    client.close()

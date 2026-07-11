@@ -14,5 +14,8 @@ class KbSearchPayload(BaseModel):
 class AgentResult(BaseModel):
     answer: str
     evidence: list[dict[str, Any]] = Field(default_factory=list)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    answer_type: str = "kb_retrieval"
     trace: list[dict[str, Any]] = Field(default_factory=list)
     error: dict[str, Any] | None = None

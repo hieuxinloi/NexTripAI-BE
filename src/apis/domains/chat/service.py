@@ -41,6 +41,7 @@ def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
         entity_types=request.entity_types,
         top_k=top_k,
         kb_client=kb_client,
+        kb_version=request.kb_version,
     )
     if agent_result.error:
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
@@ -55,7 +56,11 @@ def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
     )
     return ChatResponse(
         answer=agent_result.answer,
+        intent=agent_result.answer_type,
+        kb_version=request.kb_version,
+        facts=agent_result.facts,
         evidence=evidence,
-        recommendations=evidence,
+        recommendations=evidence if agent_result.answer_type == "recommendation" else [],
+        missing_fields=agent_result.missing_fields,
         trace=agent_result.trace,
     )

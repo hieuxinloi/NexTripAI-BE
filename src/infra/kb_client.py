@@ -52,6 +52,13 @@ class KbClient:
         }
         return self._post("/api/kb/answer", payload, timeout=60.0)
 
+    def query_v2(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict[str, Any]:
+        return self._post(
+            "/api/kb/query",
+            {"query": query, "kb_version": kb_version, "top_k": top_k},
+            timeout=60.0,
+        )
+
     def _post(self, path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         started_at = perf_counter()
         logger.info(
@@ -83,8 +90,8 @@ class KbClient:
             "KB client request end path={} status={} strategy={} result_count={} elapsed_ms={}",
             path,
             response.status_code,
-            data.get("strategy") or "-",
-            len(data.get("results") or []),
+            data.get("strategy") or data.get("kb_version") or "-",
+            len(data.get("results") or data.get("entities") or data.get("recommendations") or []),
             int((perf_counter() - started_at) * 1000),
         )
         return data

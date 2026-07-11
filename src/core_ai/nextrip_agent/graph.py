@@ -19,6 +19,7 @@ def run_nextrip_agent(
     entity_types: list[str] | None,
     top_k: int,
     kb_client: SupportsKbSearch,
+    kb_version: str = "v1",
 ) -> AgentResult:
     started_at = perf_counter()
     logger.info(
@@ -34,6 +35,7 @@ def run_nextrip_agent(
         "city": city,
         "entity_types": entity_types,
         "top_k": top_k,
+        "kb_version": kb_version,
         "trace": [],
     }
     state = intent_node(state)
@@ -42,6 +44,9 @@ def run_nextrip_agent(
     result = AgentResult(
         answer=state.get("answer") or "",
         evidence=list(state.get("evidence") or []),
+        facts=list(state.get("facts") or []),
+        missing_fields=list(state.get("missing_fields") or []),
+        answer_type=state.get("answer_type") or "kb_retrieval",
         trace=list(state.get("trace") or []),
         error=state.get("error"),
     )

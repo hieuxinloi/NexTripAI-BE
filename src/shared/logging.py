@@ -28,6 +28,8 @@ class InterceptHandler(logging.Handler):
 
 
 def configure_logging(*, service: str, level: str = "INFO") -> None:
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     logger.remove()
     logger.configure(extra={"service": service, "request_id": "-"})
     logger.add(

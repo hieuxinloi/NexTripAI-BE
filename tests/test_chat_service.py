@@ -4,6 +4,7 @@ from threading import Barrier
 
 from src.apis.domains.chat.service import infer_top_k
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
+from src.core_ai.nextrip_agent.nodes.answer import answer_node
 
 
 class FakeKbClient:
@@ -41,6 +42,37 @@ class ParallelFakeKbClient(FakeKbClient):
     def search(self, **kwargs):
         self.barrier.wait()
         return super().search(**kwargs)
+
+
+class FakeV2KbClient(FakeKbClient):
+    def query_v2(self, *, query, top_k, kb_version="v2"):
+        return {
+            "kb_version": kb_version,
+            "answer_type": "entity_detail",
+            "entities": [
+                {
+                    "place_id": "attr_dn_016",
+                    "name": "Bãi biển Mỹ Khê",
+                    "city": "Đà Nẵng",
+                    "entity_type": "attraction",
+                    "category": "Biển đảo",
+                }
+            ],
+            "facts": [
+                {
+                    "fact_id": "fact:attr_dn_016:address",
+                    "subject_id": "attr_dn_016",
+                    "predicate": "address",
+                    "value": "Đà Nẵng 550000, Việt Nam",
+                    "value_type": "string",
+                    "confidence": 0.7,
+                    "evidence_ids": ["text-unit:verified:attr_dn_016"],
+                }
+            ],
+            "evidence": [],
+            "missing_fields": [],
+            "trace": [{"step": "lookup", "status": "ok"}],
+        }
 
 
 def test_nextrip_agent_uses_kb_evidence() -> None:
@@ -83,3 +115,55 @@ def test_infer_top_k_from_message() -> None:
 
 def test_infer_top_k_uses_default_without_number() -> None:
     assert infer_top_k("Goi y quan cafe o Quy Nhon") == 5
+
+
+def test_nextrip_agent_uses_typed_v2_facts() -> None:
+    result = run_nextrip_agent(
+        message="Bãi biển Mỹ Khê ở đâu?",
+        session_id="test-v2",
+        city=None,
+        entity_types=None,
+        top_k=5,
+        kb_client=FakeV2KbClient(),
+        kb_version="v2",
+    )
+
+    assert result.answer_type == "entity_detail"
+    assert "Đà Nẵng 550000" in result.answer
+    assert result.facts[0]["predicate"] == "address"
+
+
+def test_v2_answer_formats_count_breakdown() -> None:
+    state = answer_node(
+        {
+            "session_id": "count-v2",
+            "kb_version": "v2",
+            "answer_type": "aggregate_count",
+            "facts": [
+                {"predicate": "count", "entity_type": "cafe", "value": 36},
+                {"predicate": "count", "entity_type": "restaurant", "value": 70},
+                {"predicate": "count", "entity_type": "hotel", "value": 30},
+            ],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert "Quán cafe: 36" in state["answer"]
+    assert "Nhà hàng: 70" in state["answer"]
+    assert "Khách sạn: 30" in state["answer"]
+
+
+def test_v2_missing_entity_is_not_reported_as_service_failure() -> None:
+    state = answer_node(
+        {
+            "session_id": "missing-v2",
+            "kb_version": "v2",
+            "answer_type": "entity_detail",
+            "facts": [],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert "Không tìm thấy địa điểm" in state["answer"]
