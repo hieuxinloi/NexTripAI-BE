@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+from loguru import logger
+
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
 
@@ -32,5 +34,11 @@ def answer_node(state: NexTripAgentState) -> NexTripAgentState:
             lines.append(_format_evidence_line(index, item))
         answer = "\n".join(lines)
     trace.append({"node": "answer", "status": "completed"})
+    logger.info(
+        "NexTrip node answer completed session_id={} evidence_count={} answer_len={}",
+        state.get("session_id") or "-",
+        len(evidence),
+        len(answer),
+    )
     return {**state, "answer": answer, "trace": trace}
 

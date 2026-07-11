@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class KbSearchPayload(BaseModel):
+    strategy: str | None = None
     results: list[dict[str, Any]] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -7,6 +7,7 @@ Backend service for NexTripAI. This repo owns the API layer, AI agent orchestrat
 Read this before implementation:
 
 - Repo workflow: [docs/WORKFLOW.md](docs/WORKFLOW.md)
+- Logging: [docs/LOGGING.md](docs/LOGGING.md)
 - System workflow: [../docs/WORKFLOW.md](../docs/WORKFLOW.md)
 - Repo structure guide: [../docs/REPO_STRUCTURE.md](../docs/REPO_STRUCTURE.md)
 - Step-by-step roadmap: [../docs/IMPLEMENTATION_STEPS.md](../docs/IMPLEMENTATION_STEPS.md)

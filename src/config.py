@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     nextrip_be_port: int = 8000
     nextrip_kb_base_url: str = "http://localhost:8010"
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    log_level: str = "INFO"
 
     @property
     def cors_origins(self) -> list[str]:

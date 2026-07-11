@@ -6,11 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.apis.routers import include_api_routers
 from src.config import settings
+from src.shared.logging import configure_logging, install_request_logging
 
 
 def create_app() -> FastAPI:
     app_settings = settings()
+    configure_logging(service="nextrip-be", level=app_settings.log_level)
     app = FastAPI(title="NexTripAI Backend")
+    install_request_logging(app)
     if app_settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

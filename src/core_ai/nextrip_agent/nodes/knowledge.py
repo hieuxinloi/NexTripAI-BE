@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Protocol
+
+from loguru import logger
 
 from src.core_ai.nextrip_agent.schemas import KbSearchPayload
 from src.core_ai.nextrip_agent.state import NexTripAgentState
@@ -34,9 +37,18 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
     ]
     try:
         for index, request in enumerate(retrieval_plan, start=1):
+            request_started_at = perf_counter()
             query = _query_with_city(request.get("query") or state["message"], state.get("city"))
             entity_types = request.get("entity_types")
             top_k = request.get("top_k") or state["top_k"]
+            logger.info(
+                "NexTrip node knowledge request start session_id={} request_index={} query={!r} entity_types={} top_k={}",
+                state.get("session_id") or "-",
+                index,
+                query,
+                entity_types or [],
+                top_k,
+            )
             raw_payload = kb_client.search(
                 query=query,
                 city=state.get("city"),
@@ -45,6 +57,15 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
             )
             payload = KbSearchPayload.model_validate(raw_payload)
             evidence.extend(payload.results)
+            logger.info(
+                "NexTrip node knowledge request end session_id={} request_index={} strategy={} result_count={} result_ids={} elapsed_ms={}",
+                state.get("session_id") or "-",
+                index,
+                payload.strategy or "-",
+                len(payload.results),
+                [item.get("place_id") for item in payload.results],
+                int((perf_counter() - request_started_at) * 1000),
+            )
             trace.append(
                 {
                     "node": "knowledge",
@@ -58,8 +79,19 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
             )
             trace.extend(payload.trace)
         trace.append({"node": "knowledge", "status": "completed", "count": len(evidence)})
+        logger.info(
+            "NexTrip node knowledge completed session_id={} request_count={} evidence_count={}",
+            state.get("session_id") or "-",
+            len(retrieval_plan),
+            len(evidence),
+        )
         return {**state, "evidence": evidence, "trace": trace}
     except Exception as exc:
+        logger.exception(
+            "NexTrip node knowledge error session_id={} error_type={}",
+            state.get("session_id") or "-",
+            exc.__class__.__name__,
+        )
         trace.append(
             {
                 "node": "knowledge",

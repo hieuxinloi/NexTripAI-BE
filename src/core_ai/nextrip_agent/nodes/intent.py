@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from loguru import logger
+
 from src.core_ai.nextrip_agent.retrieval_plan import build_retrieval_plan
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
@@ -22,5 +24,11 @@ def intent_node(state: NexTripAgentState) -> NexTripAgentState:
             "intent": "kb_retrieval",
             "retrieval_plan": plan_payload,
         }
+    )
+    logger.info(
+        "NexTrip node intent result session_id={} request_count={} plan={}",
+        state.get("session_id") or "-",
+        len(plan_payload),
+        plan_payload,
     )
     return {**state, "retrieval_plan": plan_payload, "trace": trace}
