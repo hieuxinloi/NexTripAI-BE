@@ -4,6 +4,7 @@ from time import perf_counter
 
 from loguru import logger
 
+from src.core_ai.nextrip_agent.constants import DEFAULT_KB_VERSION, KbVersion
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
 from src.core_ai.nextrip_agent.nodes.intent import intent_node
 from src.core_ai.nextrip_agent.nodes.knowledge import SupportsKbSearch, knowledge_node
@@ -19,7 +20,7 @@ def run_nextrip_agent(
     entity_types: list[str] | None,
     top_k: int,
     kb_client: SupportsKbSearch,
-    kb_version: str = "v1",
+    kb_version: KbVersion = DEFAULT_KB_VERSION,
 ) -> AgentResult:
     started_at = perf_counter()
     logger.info(
@@ -49,6 +50,10 @@ def run_nextrip_agent(
         answer_type=state.get("answer_type") or "kb_retrieval",
         trace=list(state.get("trace") or []),
         error=state.get("error"),
+        query_plan=dict(state.get("query_plan") or {}),
+        matched_paths=list(state.get("matched_paths") or []),
+        constraint_results=list(state.get("constraint_results") or []),
+        required_tools=list(state.get("required_tools") or []),
     )
     logger.info(
         "NexTrip agent end session_id={} evidence_count={} trace_events={} elapsed_ms={}",

@@ -45,7 +45,7 @@ class ParallelFakeKbClient(FakeKbClient):
 
 
 class FakeV2KbClient(FakeKbClient):
-    def query_v2(self, *, query, top_k, kb_version="v2"):
+    def query_typed(self, *, query, top_k, kb_version="v2"):
         return {
             "kb_version": kb_version,
             "answer_type": "entity_detail",

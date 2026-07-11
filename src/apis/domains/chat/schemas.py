@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+from src.core_ai.nextrip_agent.constants import DEFAULT_KB_VERSION, KbVersion
 
 
 class ChatRequest(BaseModel):
@@ -11,7 +13,7 @@ class ChatRequest(BaseModel):
     city: str | None = None
     entity_types: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
-    kb_version: Literal["v1", "v2", "v3"] = "v1"
+    kb_version: KbVersion = DEFAULT_KB_VERSION
 
 
 class EvidenceItem(BaseModel):
@@ -29,10 +31,14 @@ class EvidenceItem(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     intent: str = "kb_retrieval"
-    kb_version: Literal["v1", "v2", "v3"] = "v1"
+    kb_version: KbVersion = DEFAULT_KB_VERSION
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)
     itinerary: list[dict[str, Any]] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    matched_paths: list[dict[str, Any]] = Field(default_factory=list)
+    constraint_results: list[dict[str, Any]] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)

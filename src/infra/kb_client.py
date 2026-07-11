@@ -52,7 +52,7 @@ class KbClient:
         }
         return self._post("/api/kb/answer", payload, timeout=60.0)
 
-    def query_v2(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict[str, Any]:
+    def query_typed(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict[str, Any]:
         return self._post(
             "/api/kb/query",
             {"query": query, "kb_version": kb_version, "top_k": top_k},

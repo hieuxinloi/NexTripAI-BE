@@ -2,6 +2,7 @@
 
 from loguru import logger
 
+from src.core_ai.nextrip_agent.constants import DEFAULT_TYPED_KB_VERSION, TYPED_KB_VERSIONS
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
 
@@ -25,12 +26,15 @@ def answer_node(state: NexTripAgentState) -> NexTripAgentState:
     evidence = list(state.get("evidence") or [])
     facts = list(state.get("facts") or [])
     missing_fields = list(state.get("missing_fields") or [])
-    if missing_fields:
+    required_tools = list(state.get("required_tools") or [])
+    if required_tools:
+        answer = "Câu hỏi này cần dữ liệu động từ: " + ", ".join(required_tools) + "."
+    elif missing_fields:
         answer = f"Mình cần bạn bổ sung: {', '.join(missing_fields)}."
-    elif state.get("kb_version") in {"v2", "v3"} and facts:
-        answer = _format_typed_facts(evidence, facts, state.get("kb_version") or "v2")
-    elif state.get("kb_version") in {"v2", "v3"} and state.get("answer_type") == "entity_detail":
-        answer = "Không tìm thấy địa điểm khớp đủ tin cậy trong Knowledge Base V2."
+    elif state.get("kb_version") in TYPED_KB_VERSIONS and facts:
+        answer = _format_typed_facts(evidence, facts, state.get("kb_version") or DEFAULT_TYPED_KB_VERSION)
+    elif state.get("kb_version") in TYPED_KB_VERSIONS and state.get("answer_type") == "entity_detail":
+        answer = f"Không tìm thấy địa điểm khớp đủ tin cậy trong Knowledge Base {str(state.get('kb_version')).upper()}."
     elif not evidence:
         answer = (
             "Hien tai chua lay duoc ket qua tu Knowledge Base. "

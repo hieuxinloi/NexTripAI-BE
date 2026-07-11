@@ -11,6 +11,27 @@ class KbSearchPayload(BaseModel):
     trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class TypedCitation(BaseModel):
+    subject_id: str | None = None
+    source_name: str | None = None
+    url: str | None = None
+
+
+class TypedKbPayload(BaseModel):
+    kb_version: str
+    answer_type: str = "kb_retrieval"
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[TypedCitation] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    matched_paths: list[dict[str, Any]] = Field(default_factory=list)
+    constraint_results: list[dict[str, Any]] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)
+    trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AgentResult(BaseModel):
     answer: str
     evidence: list[dict[str, Any]] = Field(default_factory=list)
@@ -19,3 +40,7 @@ class AgentResult(BaseModel):
     answer_type: str = "kb_retrieval"
     trace: list[dict[str, Any]] = Field(default_factory=list)
     error: dict[str, Any] | None = None
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    matched_paths: list[dict[str, Any]] = Field(default_factory=list)
+    constraint_results: list[dict[str, Any]] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)

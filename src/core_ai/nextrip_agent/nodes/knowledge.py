@@ -8,7 +8,12 @@ from typing import Protocol
 
 from loguru import logger
 
-from src.core_ai.nextrip_agent.schemas import KbSearchPayload
+from src.core_ai.nextrip_agent.constants import (
+    DEFAULT_TYPED_KB_VERSION,
+    KbVersion,
+    TYPED_KB_VERSIONS,
+)
+from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload
 from src.core_ai.nextrip_agent.retrieval_plan import RetrievalRequest
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
@@ -24,7 +29,13 @@ class SupportsKbSearch(Protocol):
     ) -> dict:
         ...
 
-    def query_v2(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict:
+    def query_typed(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        kb_version: KbVersion = DEFAULT_TYPED_KB_VERSION,
+    ) -> dict:
         ...
 
 
@@ -115,8 +126,8 @@ def _execute_plan(
 
 
 def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> NexTripAgentState:
-    if state.get("kb_version") in {"v2", "v3"}:
-        return _knowledge_v2(state, kb_client)
+    if state.get("kb_version") in TYPED_KB_VERSIONS:
+        return _knowledge_typed(state, kb_client)
     trace = list(state.get("trace") or [])
     evidence: list[dict] = []
     retrieval_plan = state["retrieval_plan"]
@@ -171,58 +182,62 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
         }
 
 
-def _knowledge_v2(
+def _knowledge_typed(
     state: NexTripAgentState,
     kb_client: SupportsKbSearch,
 ) -> NexTripAgentState:
     trace = list(state.get("trace") or [])
     started_at = perf_counter()
+    kb_version = state.get("kb_version") or DEFAULT_TYPED_KB_VERSION
     try:
         query = _query_with_city(state["message"], state.get("city"))
-        payload = kb_client.query_v2(
-            query=query,
-            top_k=state["top_k"],
-            kb_version=state.get("kb_version") or "v2",
+        payload = TypedKbPayload.model_validate(
+            kb_client.query_typed(
+                query=query,
+                top_k=state["top_k"],
+                kb_version=kb_version,
+            )
         )
-        evidence = list(payload.get("recommendations") or payload.get("entities") or [])
-        source = next(iter(payload.get("evidence") or []), None)
-        if source:
-            source_info = {
-                "name": source.get("source_name"),
-                "url": source.get("url"),
-            }
-            evidence = [{**item, "source": source_info} for item in evidence]
-        trace.extend(payload.get("trace") or [])
+        evidence = _attach_candidate_sources(
+            payload.recommendations or payload.entities,
+            payload,
+        )
+        trace.extend(payload.trace)
         trace.append(
             {
                 "node": "knowledge",
                 "status": "completed",
-                "kb_version": state.get("kb_version") or "v2",
+                "kb_version": kb_version,
                 "query": query,
                 "count": len(evidence),
-                "fact_count": len(payload.get("facts") or []),
+                "fact_count": len(payload.facts),
                 "elapsed_ms": int((perf_counter() - started_at) * 1000),
             }
         )
         return {
             **state,
-            "answer_type": payload.get("answer_type") or "kb_retrieval",
+            "answer_type": payload.answer_type,
             "evidence": evidence,
-            "facts": list(payload.get("facts") or []),
-            "missing_fields": list(payload.get("missing_fields") or []),
+            "facts": payload.facts,
+            "missing_fields": payload.missing_fields,
+            "query_plan": payload.query_plan,
+            "matched_paths": payload.matched_paths,
+            "constraint_results": payload.constraint_results,
+            "required_tools": payload.required_tools,
             "trace": trace,
         }
     except Exception as exc:
         logger.exception(
-            "NexTrip node knowledge V2 error session_id={} error_type={}",
+            "NexTrip node knowledge typed error session_id={} kb_version={} error_type={}",
             state.get("session_id") or "-",
+            kb_version,
             exc.__class__.__name__,
         )
         trace.append(
             {
                 "node": "knowledge",
                 "status": "error",
-                "kb_version": state.get("kb_version") or "v2",
+                "kb_version": kb_version,
                 "error_type": exc.__class__.__name__,
                 "message": str(exc),
             }
@@ -231,10 +246,41 @@ def _knowledge_v2(
             **state,
             "evidence": [],
             "facts": [],
+            "query_plan": {},
+            "matched_paths": [],
+            "constraint_results": [],
+            "required_tools": [],
             "error": {
                 "code": "kb_unavailable",
-                "message": "Knowledge Base V2 is temporarily unavailable.",
+                "message": f"Knowledge Base {kb_version.upper()} is temporarily unavailable.",
                 "retryable": True,
             },
             "trace": trace,
         }
+
+
+def _attach_candidate_sources(
+    candidates: list[dict],
+    payload: TypedKbPayload,
+) -> list[dict]:
+    sources_by_subject = {
+        citation.subject_id: {
+            "name": citation.source_name,
+            "url": citation.url,
+        }
+        for citation in payload.evidence
+        if citation.subject_id is not None
+    }
+    if len(candidates) == 1 and not sources_by_subject and payload.evidence:
+        citation = payload.evidence[0]
+        sources_by_subject[candidates[0]["place_id"]] = {
+            "name": citation.source_name,
+            "url": citation.url,
+        }
+    return [
+        {
+            **candidate,
+            "source": sources_by_subject.get(candidate["place_id"], {}),
+        }
+        for candidate in candidates
+    ]

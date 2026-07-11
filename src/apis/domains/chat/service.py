@@ -63,4 +63,8 @@ def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
         recommendations=evidence if agent_result.answer_type == "recommendation" else [],
         missing_fields=agent_result.missing_fields,
         trace=agent_result.trace,
+        query_plan=agent_result.query_plan,
+        matched_paths=agent_result.matched_paths,
+        constraint_results=agent_result.constraint_results,
+        required_tools=agent_result.required_tools,
     )
