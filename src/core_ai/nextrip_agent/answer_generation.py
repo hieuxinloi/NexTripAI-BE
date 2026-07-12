@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
 
 _REDUNDANT_FACT_GROUPS = (("address", "location"),)
+
+
+def fact_value_text(value: object) -> str:
+    """Render a typed fact consistently for templates and LLM references."""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
 
 
 def facts_for_answer(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:

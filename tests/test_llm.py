@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from src.infra.llm import _protected_context, _restore_references
+from src.infra.llm import (
+    _ensure_single_entity_reference,
+    _protected_context,
+    _restore_references,
+)
 
 
 def test_grounded_context_protects_entity_names_and_fact_values() -> None:
@@ -51,6 +55,51 @@ def test_grounded_context_masks_place_name_in_question() -> None:
     )
 
     assert context["question"] == "[[PLACE_1]] địa chỉ ở đâu?"
+
+
+def test_grounded_context_formats_list_fact_as_readable_text() -> None:
+    _, replacements = _protected_context(
+        question="Món đặc trưng là gì?",
+        answer_type="entity_detail",
+        evidence=[],
+        facts=[{
+            "subject_id": "rest_qn_074",
+            "predicate": "signature_dishes",
+            "value": ["ghẹ rang me", "tôm nướng"],
+            "unit": None,
+        }],
+        matched_paths=[],
+    )
+
+    assert replacements["[[FACT_1]]"] == "ghẹ rang me, tôm nướng"
+
+
+def test_entity_profile_adds_verified_place_heading_when_model_omits_it() -> None:
+    answer = _ensure_single_entity_reference(
+        "- Địa chỉ: [[FACT_1]]",
+        answer_type="entity_detail",
+        evidence=[{"place_id": "rest_qn_074"}],
+    )
+
+    assert answer == "[[PLACE_1]]\n- Địa chỉ: [[FACT_1]]"
+
+
+def test_entity_profile_preserves_grounded_repeated_place_reference() -> None:
+    answer = _ensure_single_entity_reference(
+        "[[PLACE_1]] là nhà hàng. Địa chỉ [[PLACE_1]]: [[FACT_1]]",
+        answer_type="entity_detail",
+        evidence=[{"place_id": "rest_qn_074"}],
+    )
+
+    assert answer.count("[[PLACE_1]]") == 2
+
+
+def test_entity_profile_does_not_hide_empty_model_response() -> None:
+    assert _ensure_single_entity_reference(
+        "",
+        answer_type="entity_detail",
+        evidence=[{"place_id": "rest_qn_074"}],
+    ) == ""
 
 
 def test_grounded_answer_rejects_missing_reference() -> None:

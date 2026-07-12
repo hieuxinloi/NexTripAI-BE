@@ -8,6 +8,7 @@ from typing import Any
 from loguru import logger
 
 from src.config import Settings
+from src.core_ai.nextrip_agent.answer_generation import fact_value_text
 from src.shared.logging import safe_text
 
 
@@ -15,11 +16,15 @@ SYSTEM_INSTRUCTION = """You are the grounded answer generator for NexTripAI.
 Answer in natural Vietnamese using only the supplied GraphRAG context.
 Never invent places, addresses, prices, opening hours, ratings, reasons, or sources.
 Place, city, and fact values are protected reference tokens such as [[PLACE_1]], [[CITY_1]], and [[FACT_1]].
-Copy every PLACE and FACT reference exactly once into the answer. CITY references are optional. Never alter or explain a token.
+Use every PLACE reference at least once and every FACT reference exactly once. CITY references are optional. Never alter or explain a token.
 Never create a reference token. Use only reference tokens that exist verbatim in the supplied JSON.
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
+For an entity_detail with several verified facts, write a short overview followed
+by readable bullets for useful details such as address, cuisine, signature dishes,
+opening hours, rating, price, amenities, and suitability. Integrate every FACT
+reference into a labelled sentence or bullet; never append bare FACT references.
 Keep the answer concise and useful. Do not mention internal retrieval, JSON, nodes, or scores.
 """
 
@@ -90,6 +95,11 @@ class GeminiAnswerGenerator:
             ),
         )
         raw_answer = (response.text or "").strip()
+        raw_answer = _ensure_single_entity_reference(
+            raw_answer,
+            answer_type=answer_type,
+            evidence=evidence,
+        )
         grounded_answer = _restore_references(raw_answer, replacements)
         logger.info(
             "NexTrip answer LLM output raw={} grounded={}",
@@ -153,7 +163,7 @@ def _protected_context(
     protected_facts = []
     for index, fact in enumerate(facts, start=1):
         reference = f"[[FACT_{index}]]"
-        value = str(fact["value"])
+        value = fact_value_text(fact["value"])
         unit = fact.get("unit")
         replacements[reference] = f"{value} {unit}" if unit else value
         protected_facts.append({
@@ -187,14 +197,34 @@ def _protected_context(
     )
 
 
+def _ensure_single_entity_reference(
+    answer: str,
+    *,
+    answer_type: str,
+    evidence: list[dict[str, Any]],
+) -> str:
+    reference = "[[PLACE_1]]"
+    if not answer:
+        return answer
+    if answer_type != "entity_detail" or len(evidence) != 1:
+        return answer
+    if reference not in answer:
+        return f"{reference}\n{answer}"
+    return answer
+
+
 def _restore_references(answer: str, replacements: dict[str, str]) -> str:
     if not answer:
         raise RuntimeError("Gemini returned an empty answer")
-    missing = [
-        reference
-        for reference in replacements
-        if not reference.startswith("[[CITY_") and answer.count(reference) != 1
-    ]
+    missing = []
+    for reference in replacements:
+        count = answer.count(reference)
+        if reference.startswith("[[CITY_"):
+            continue
+        if reference.startswith("[[PLACE_") and count < 1:
+            missing.append(reference)
+        elif reference.startswith("[[FACT_") and count != 1:
+            missing.append(reference)
     if missing:
         raise RuntimeError(f"Gemini violated grounded reference contract: {missing}")
     for reference, value in replacements.items():

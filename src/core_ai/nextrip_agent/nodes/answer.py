@@ -2,7 +2,11 @@
 
 from loguru import logger
 
-from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration, facts_for_answer
+from src.core_ai.nextrip_agent.answer_generation import (
+    SupportsAnswerGeneration,
+    fact_value_text,
+    facts_for_answer,
+)
 from src.core_ai.nextrip_agent.constants import DEFAULT_TYPED_KB_VERSION, TYPED_KB_VERSIONS
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
@@ -127,6 +131,6 @@ def _format_typed_facts(evidence: list[dict], facts: list[dict], kb_version: str
             continue
         label = labels.get(predicate, str(predicate))
         unit = f" {fact['unit']}" if fact.get("unit") else ""
-        lines.append(f"- {label}: {fact.get('value')}{unit}")
+        lines.append(f"- {label}: {fact_value_text(fact.get('value'))}{unit}")
     return "\n".join(lines)
 
