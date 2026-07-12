@@ -5,32 +5,20 @@ from datetime import date
 import httpx
 
 from src.core_ai.nextrip_agent.weather import WeatherAgent, assess_suitability
-from src.infra.weather import GoogleWeatherClient
+from src.infra.weather import OpenMeteoWeatherClient
 
 
 def _weather_payload(today: date) -> dict:
     return {
-        "forecastDays": [
-            {
-                "displayDate": {
-                    "year": today.year,
-                    "month": today.month,
-                    "day": today.day,
-                },
-                "daytimeForecast": {
-                    "weatherCondition": {
-                        "type": "PARTLY_CLOUDY",
-                        "description": {"text": "Có mây"},
-                    },
-                    "precipitation": {"probability": {"percent": 20}},
-                    "thunderstormProbability": 5,
-                    "uvIndex": 6,
-                    "wind": {"gust": {"value": 18}},
-                },
-                "minTemperature": {"degrees": 25},
-                "maxTemperature": {"degrees": 31},
-            }
-        ]
+        "daily": {
+            "time": [today.isoformat()],
+            "weather_code": [2],
+            "temperature_2m_min": [25],
+            "temperature_2m_max": [31],
+            "precipitation_probability_max": [20],
+            "uv_index_max": [6],
+            "wind_gusts_10m_max": [18],
+        }
     }
 
 
@@ -43,10 +31,7 @@ def test_weather_agent_routes_and_assesses_vietnamese_question() -> None:
             request=request,
         )
     )
-    client = GoogleWeatherClient(
-        "test-key",
-        client=httpx.Client(transport=transport),
-    )
+    client = OpenMeteoWeatherClient(client=httpx.Client(transport=transport))
 
     assert WeatherAgent.should_run(
         message="Hôm nay Đà Nẵng có mưa không?",
@@ -61,9 +46,10 @@ def test_weather_agent_routes_and_assesses_vietnamese_question() -> None:
         longitude=None,
     )
 
-    assert result.condition == "Có mây"
+    assert result.condition == "Có mây rải rác"
     assert result.precipitation_probability == 20
     assert result.suitability == "suitable"
+    assert result.source == "Open-Meteo"
 
 
 def test_heavy_rain_is_unsuitable() -> None:
