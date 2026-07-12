@@ -6,6 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.apis.routers import include_api_routers
 from src.config import settings
 from src.infra.kb_client import KbClient
@@ -18,10 +19,16 @@ async def lifespan(app: FastAPI):
     app_settings = settings()
     kb_client = KbClient(app_settings.nextrip_kb_base_url)
     answer_generator = create_answer_generator(app_settings)
+    chat_worker_pool = ChatWorkerPool(
+        worker_count=app_settings.ai_worker_count,
+        queue_capacity=app_settings.ai_queue_capacity,
+    )
     app.state.kb_client = kb_client
     app.state.answer_generator = answer_generator
     try:
-        yield
+        async with chat_worker_pool.run():
+            app.state.chat_worker_pool = chat_worker_pool
+            yield
     finally:
         kb_client.close()
         if answer_generator is not None:

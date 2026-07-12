@@ -11,10 +11,11 @@ class FailingKbClient:
 
 
 def test_app_exposes_health() -> None:
-    client = TestClient(create_app())
-    response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
+    with TestClient(create_app()) as client:
+        response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["worker_pool"]["workers"] == 5
     assert response.headers["X-Request-ID"] == "test-request-id"
 
 

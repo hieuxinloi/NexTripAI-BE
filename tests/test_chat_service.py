@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from threading import Barrier
-
-from src.apis.domains.chat.service import infer_top_k
+from src.apis.domains.chat.schemas import ChatRequest
+from src.apis.domains.chat.service import resolve_top_k
 from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
@@ -33,16 +32,6 @@ class FakeKbClient:
             ],
             "trace": [{"step": "fake_search", "status": "ok"}],
         }
-
-
-class ParallelFakeKbClient(FakeKbClient):
-    def __init__(self) -> None:
-        super().__init__()
-        self.barrier = Barrier(2, timeout=1)
-
-    def search(self, **kwargs):
-        self.barrier.wait()
-        return super().search(**kwargs)
 
 
 class FakeV2KbClient(FakeKbClient):
@@ -107,7 +96,7 @@ def test_nextrip_agent_uses_kb_evidence() -> None:
 
 
 def test_nextrip_agent_splits_multi_entity_counts() -> None:
-    fake_kb = ParallelFakeKbClient()
+    fake_kb = FakeKbClient()
     result = run_nextrip_agent(
         message="Goi y 3 quan cafe va 5 nha hang o Quy Nhon",
         session_id="test-session",
@@ -125,12 +114,25 @@ def test_nextrip_agent_splits_multi_entity_counts() -> None:
     assert result.evidence[3]["entity_type"] == "restaurant"
 
 
-def test_infer_top_k_from_message() -> None:
-    assert infer_top_k("Goi y 3 quan cafe o Quy Nhon") == 3
+def test_typed_query_lets_kb_planner_choose_requested_result_count() -> None:
+    request = ChatRequest(
+        message="Quy Nhon 1 ngay can lam gi?",
+        session_id="planner-limit",
+        kb_version="v4",
+    )
+
+    assert resolve_top_k(request) == 20
 
 
-def test_infer_top_k_uses_default_without_number() -> None:
-    assert infer_top_k("Goi y quan cafe o Quy Nhon") == 5
+def test_explicit_top_k_overrides_query_ceiling() -> None:
+    request = ChatRequest(
+        message="Goi y quan cafe o Quy Nhon",
+        session_id="explicit-limit",
+        kb_version="v4",
+        top_k=7,
+    )
+
+    assert resolve_top_k(request) == 7
 
 
 def test_nextrip_agent_uses_typed_v2_facts() -> None:

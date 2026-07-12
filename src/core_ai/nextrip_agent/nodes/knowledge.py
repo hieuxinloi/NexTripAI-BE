@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
@@ -107,22 +105,15 @@ def _execute_plan(
     state: NexTripAgentState,
     kb_client: SupportsKbSearch,
 ) -> list[SearchOutcome]:
-    if len(retrieval_plan) == 1:
-        return [_run_search(index=1, request=retrieval_plan[0], state=state, kb_client=kb_client)]
-
-    with ThreadPoolExecutor(max_workers=len(retrieval_plan), thread_name_prefix="kb-search") as pool:
-        futures = [
-            pool.submit(
-                copy_context().run,
-                _run_search,
-                index=index,
-                request=request,
-                state=state,
-                kb_client=kb_client,
-            )
-            for index, request in enumerate(retrieval_plan, start=1)
-        ]
-        return [future.result() for future in futures]
+    return [
+        _run_search(
+            index=index,
+            request=request,
+            state=state,
+            kb_client=kb_client,
+        )
+        for index, request in enumerate(retrieval_plan, start=1)
+    ]
 
 
 def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> NexTripAgentState:

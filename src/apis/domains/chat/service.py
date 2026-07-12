@@ -7,20 +7,22 @@ from loguru import logger
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
+from src.core_ai.nextrip_agent.constants import TYPED_KB_VERSIONS
 from src.infra.kb_client import KbClient
 
 DEFAULT_TOP_K = 5
-MAX_INFERRED_TOP_K = 10
+TYPED_QUERY_RESULT_CEILING = 20
 
 
 class KnowledgeBaseUnavailableError(RuntimeError):
     pass
 
 
-def infer_top_k(message: str) -> int:
-    for token in message.split():
-        if token.isdigit():
-            return max(1, min(int(token), MAX_INFERRED_TOP_K))
+def resolve_top_k(request: ChatRequest) -> int:
+    if request.top_k is not None:
+        return request.top_k
+    if request.kb_version in TYPED_KB_VERSIONS:
+        return TYPED_QUERY_RESULT_CEILING
     return DEFAULT_TOP_K
 
 
@@ -30,7 +32,7 @@ def handle_chat(
     answer_generator: SupportsAnswerGeneration | None = None,
 ) -> ChatResponse:
     started_at = perf_counter()
-    top_k = request.top_k if request.top_k is not None else infer_top_k(request.message)
+    top_k = resolve_top_k(request)
     logger.info(
         "Chat turn start session_id={} city={} entity_types={} top_k={} message_len={}",
         request.session_id,
