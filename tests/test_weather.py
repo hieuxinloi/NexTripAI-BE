@@ -4,7 +4,7 @@ from datetime import date
 
 import httpx
 
-from src.core_ai.nextrip_agent.weather import WeatherAgent, assess_suitability
+from src.core_ai.nextrip_agent.weather import WeatherAgent, assess_suitability, vietnam_today
 from src.infra.weather import OpenMeteoWeatherClient
 
 
@@ -23,7 +23,7 @@ def _weather_payload(today: date) -> dict:
 
 
 def test_weather_agent_routes_and_assesses_vietnamese_question() -> None:
-    today = date(2026, 7, 12)
+    today = vietnam_today()
     transport = httpx.MockTransport(
         lambda request: httpx.Response(
             200,
