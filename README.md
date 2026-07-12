@@ -8,9 +8,6 @@ Read this before implementation:
 
 - Repo workflow: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 - Logging: [docs/LOGGING.md](docs/LOGGING.md)
-- System workflow: [../docs/WORKFLOW.md](../docs/WORKFLOW.md)
-- Repo structure guide: [../docs/REPO_STRUCTURE.md](../docs/REPO_STRUCTURE.md)
-- Step-by-step roadmap: [../docs/IMPLEMENTATION_STEPS.md](../docs/IMPLEMENTATION_STEPS.md)
 
 This backend should be local-first: FastAPI for APIs, LangGraph for the agent workflow, and HTTP clients for KB/weather integrations. Do not copy Azure/Foundry/Teams infrastructure from the reference Orchestrator project.
 
@@ -73,3 +70,21 @@ NexTripAI-FE -> NexTripAI-BE -> NexTripAI-KB
 - Keep prompts, agent graph definitions, and tool wrappers versioned.
 - Log retrieved evidence from the KB to reduce hallucination risk.
 - Keep response schemas stable so the frontend can render itinerary, recommendations, and citations consistently.
+
+## Run Locally
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m uvicorn src.app:app --reload --port 8000
+```
+
+Implemented endpoints:
+
+- `GET /health`
+- `POST /api/chat`
+
+The chat pipeline calls the KB over HTTP, optionally checks Google Weather API, and stores
+conversation messages in memory or Firestore. It never connects directly to Neo4j.

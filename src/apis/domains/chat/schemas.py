@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.core_ai.nextrip_agent.constants import DEFAULT_KB_VERSION, KbVersion
+from src.core_ai.nextrip_agent.weather import WeatherAssessment
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
-    session_id: str = Field(..., min_length=1)
-    city: str | None = None
+    message: str = Field(..., min_length=1, max_length=4000)
+    session_id: str = Field(..., min_length=1, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
+    city: str | None = Field(default=None, max_length=80)
     entity_types: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
     kb_version: KbVersion = DEFAULT_KB_VERSION
+    travel_date: date | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    include_weather: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_coordinates(self) -> "ChatRequest":
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must be provided together")
+        return self
 
 
 class EvidenceItem(BaseModel):
@@ -29,6 +42,8 @@ class EvidenceItem(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    session_id: str
+    message_id: str
     answer: str
     intent: str = "kb_retrieval"
     kb_version: KbVersion = DEFAULT_KB_VERSION
@@ -42,3 +57,4 @@ class ChatResponse(BaseModel):
     matched_paths: list[dict[str, Any]] = Field(default_factory=list)
     constraint_results: list[dict[str, Any]] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
+    weather: WeatherAssessment | None = None

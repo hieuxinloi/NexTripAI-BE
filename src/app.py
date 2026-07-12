@@ -10,6 +10,8 @@ from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.apis.routers import include_api_routers
 from src.config import settings
 from src.infra.kb_client import KbClient
+from src.infra.chat_store import create_chat_store
+from src.infra.weather import GoogleWeatherClient
 from src.infra.llm import create_answer_generator
 from src.shared.logging import configure_logging, install_request_logging
 
@@ -19,12 +21,21 @@ async def lifespan(app: FastAPI):
     app_settings = settings()
     kb_client = KbClient(app_settings.nextrip_kb_base_url)
     answer_generator = create_answer_generator(app_settings)
+    weather_client = GoogleWeatherClient(
+        app_settings.google_weather_api_key,
+        app_settings.weather_timeout_seconds,
+    )
+    chat_store = create_chat_store(app_settings)
     chat_worker_pool = ChatWorkerPool(
         worker_count=app_settings.ai_worker_count,
         queue_capacity=app_settings.ai_queue_capacity,
+        weather_client=weather_client,
+        chat_store=chat_store,
     )
     app.state.kb_client = kb_client
     app.state.answer_generator = answer_generator
+    app.state.weather_client = weather_client
+    app.state.chat_store = chat_store
     try:
         async with chat_worker_pool.run():
             app.state.chat_worker_pool = chat_worker_pool
@@ -33,6 +44,8 @@ async def lifespan(app: FastAPI):
         kb_client.close()
         if answer_generator is not None:
             answer_generator.close()
+        weather_client.close()
+        chat_store.close()
 
 
 def create_app() -> FastAPI:

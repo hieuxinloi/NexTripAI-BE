@@ -14,6 +14,8 @@ from src.apis.domains.chat.schemas import ChatRequest, ChatResponse
 from src.apis.domains.chat.service import handle_chat
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.infra.kb_client import KbClient
+from src.infra.chat_store import ChatStore
+from src.infra.weather import GoogleWeatherClient
 from src.shared.request_context import current_request_id
 
 
@@ -42,6 +44,8 @@ class ChatWorkerPool:
         worker_count: int,
         queue_capacity: int,
         handler: ChatHandler = handle_chat,
+        weather_client: GoogleWeatherClient | None = None,
+        chat_store: ChatStore | None = None,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be positive")
@@ -50,6 +54,8 @@ class ChatWorkerPool:
         self.worker_count = worker_count
         self.queue_capacity = queue_capacity
         self._handler = handler
+        self._weather_client = weather_client
+        self._chat_store = chat_store
         self._send_stream: MemoryObjectSendStream[ChatJob] | None = None
         self._active_jobs = 0
 
@@ -152,12 +158,22 @@ class ChatWorkerPool:
                         queue_wait_ms,
                     )
                     try:
-                        handler = partial(
-                            self._handler,
-                            job.request,
-                            job.kb_client,
-                            job.answer_generator,
-                        )
+                        if self._weather_client is None and self._chat_store is None:
+                            handler = partial(
+                                self._handler,
+                                job.request,
+                                job.kb_client,
+                                job.answer_generator,
+                            )
+                        else:
+                            handler = partial(
+                                self._handler,
+                                job.request,
+                                job.kb_client,
+                                job.answer_generator,
+                                weather_client=self._weather_client,
+                                chat_store=self._chat_store,
+                            )
                         job.result = await to_thread.run_sync(
                             handler,
                             abandon_on_cancel=False,

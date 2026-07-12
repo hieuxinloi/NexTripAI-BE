@@ -31,6 +31,8 @@ async def test_sixth_chat_waits_until_one_of_five_workers_finishes() -> None:
         with state_lock:
             active_jobs -= 1
         return ChatResponse(
+            session_id=request.session_id,
+            message_id=f"reply-{request.session_id}",
             answer=request.message,
             intent="test",
             kb_version=request.kb_version,
@@ -59,7 +61,11 @@ async def test_sixth_chat_waits_until_one_of_five_workers_finishes() -> None:
             with fail_after(2):
                 while True:
                     statistics = pool.statistics()
-                    if statistics["active_jobs"] == 5 and statistics["queued_jobs"] == 1:
+                    if (
+                        statistics["active_jobs"] == 5
+                        and statistics["queued_jobs"] == 1
+                        and maximum_active_jobs == 5
+                    ):
                         break
                     await sleep(0.01)
 
@@ -76,6 +82,8 @@ async def test_failed_chat_does_not_stop_worker_pool() -> None:
         if request.message == "fail":
             raise ValueError("failed job")
         return ChatResponse(
+            session_id=request.session_id,
+            message_id=f"reply-{request.session_id}",
             answer=request.message,
             intent="test",
             kb_version=request.kb_version,
