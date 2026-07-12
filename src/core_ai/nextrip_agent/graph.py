@@ -6,6 +6,7 @@ from loguru import logger
 
 from src.core_ai.nextrip_agent.constants import DEFAULT_KB_VERSION, KbVersion
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
+from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.nodes.intent import intent_node
 from src.core_ai.nextrip_agent.nodes.knowledge import SupportsKbSearch, knowledge_node
 from src.core_ai.nextrip_agent.schemas import AgentResult
@@ -21,6 +22,7 @@ def run_nextrip_agent(
     top_k: int,
     kb_client: SupportsKbSearch,
     kb_version: KbVersion = DEFAULT_KB_VERSION,
+    answer_generator: SupportsAnswerGeneration | None = None,
 ) -> AgentResult:
     started_at = perf_counter()
     logger.info(
@@ -41,7 +43,7 @@ def run_nextrip_agent(
     }
     state = intent_node(state)
     state = knowledge_node(state, kb_client)
-    state = answer_node(state)
+    state = answer_node(state, answer_generator)
     result = AgentResult(
         answer=state.get("answer") or "",
         evidence=list(state.get("evidence") or []),

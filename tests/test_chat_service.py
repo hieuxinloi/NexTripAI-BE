@@ -3,6 +3,7 @@ from __future__ import annotations
 from threading import Barrier
 
 from src.apis.domains.chat.service import infer_top_k
+from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
 
@@ -75,6 +76,21 @@ class FakeV2KbClient(FakeKbClient):
         }
 
 
+class FakeAnswerGenerator:
+    def __init__(self, answer: str = "Câu trả lời được diễn đạt từ GraphRAG.") -> None:
+        self.answer = answer
+        self.calls: list[dict] = []
+
+    def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.answer
+
+
+class FailingAnswerGenerator:
+    def generate(self, **kwargs):
+        raise RuntimeError("LLM unavailable")
+
+
 def test_nextrip_agent_uses_kb_evidence() -> None:
     fake_kb = FakeKbClient()
     result = run_nextrip_agent(
@@ -133,6 +149,52 @@ def test_nextrip_agent_uses_typed_v2_facts() -> None:
     assert result.facts[0]["predicate"] == "address"
 
 
+def test_answer_agent_uses_grounded_generator_context() -> None:
+    generator = FakeAnswerGenerator()
+    result = run_nextrip_agent(
+        message="Bãi biển Mỹ Khê ở đâu?",
+        session_id="test-grounded-answer",
+        city=None,
+        entity_types=None,
+        top_k=5,
+        kb_client=FakeV2KbClient(),
+        kb_version="v2",
+        answer_generator=generator,
+    )
+
+    assert result.answer == generator.answer
+    assert generator.calls[0]["facts"][0]["predicate"] == "address"
+    assert result.trace[-1]["generator"] == "llm_grounded"
+
+
+def test_answer_generator_omits_redundant_location_when_address_exists() -> None:
+    facts = facts_for_answer([
+        {"subject_id": "hotel_qn_001", "predicate": "address", "value": "186 Xuân Diệu"},
+        {"subject_id": "hotel_qn_001", "predicate": "location", "value": {"lat": 1, "lng": 2}},
+        {"subject_id": "hotel_qn_001", "predicate": "phone", "value": "0123"},
+    ])
+
+    predicates = [fact["predicate"] for fact in facts]
+    assert predicates == ["address", "phone"]
+
+
+def test_answer_agent_falls_back_when_llm_fails() -> None:
+    result = run_nextrip_agent(
+        message="Bãi biển Mỹ Khê ở đâu?",
+        session_id="test-answer-fallback",
+        city=None,
+        entity_types=None,
+        top_k=5,
+        kb_client=FakeV2KbClient(),
+        kb_version="v2",
+        answer_generator=FailingAnswerGenerator(),
+    )
+
+    assert "Đà Nẵng 550000" in result.answer
+    assert result.trace[-2]["status"] == "fallback"
+    assert result.trace[-1]["generator"] == "template"
+
+
 def test_v2_answer_formats_count_breakdown() -> None:
     state = answer_node(
         {
@@ -167,3 +229,19 @@ def test_v2_missing_entity_is_not_reported_as_service_failure() -> None:
     )
 
     assert "Không tìm thấy địa điểm" in state["answer"]
+
+
+def test_missing_v4_entity_is_reported_as_absent_data() -> None:
+    state = answer_node(
+        {
+            "session_id": "missing-v4",
+            "kb_version": "v4",
+            "answer_type": "entity_detail",
+            "missing_fields": ["not_found:entity:FLC"],
+            "facts": [],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert state["answer"] == "Mình chưa tìm thấy FLC trong Knowledge Base V4."

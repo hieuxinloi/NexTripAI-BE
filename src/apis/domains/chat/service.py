@@ -6,6 +6,7 @@ from loguru import logger
 
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
+from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.infra.kb_client import KbClient
 
 DEFAULT_TOP_K = 5
@@ -23,7 +24,11 @@ def infer_top_k(message: str) -> int:
     return DEFAULT_TOP_K
 
 
-def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
+def handle_chat(
+    request: ChatRequest,
+    kb_client: KbClient,
+    answer_generator: SupportsAnswerGeneration | None = None,
+) -> ChatResponse:
     started_at = perf_counter()
     top_k = request.top_k if request.top_k is not None else infer_top_k(request.message)
     logger.info(
@@ -42,6 +47,7 @@ def handle_chat(request: ChatRequest, kb_client: KbClient) -> ChatResponse:
         top_k=top_k,
         kb_client=kb_client,
         kb_version=request.kb_version,
+        answer_generator=answer_generator,
     )
     if agent_result.error:
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
