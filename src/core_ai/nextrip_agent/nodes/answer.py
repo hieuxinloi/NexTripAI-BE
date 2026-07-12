@@ -40,6 +40,11 @@ def answer_node(
         for field in missing_fields
         if field.startswith("not_found:entity:")
     ]
+    unverified_geo_scopes = [
+        field.removeprefix("verified_geo_candidates:")
+        for field in missing_fields
+        if field.startswith("verified_geo_candidates:")
+    ]
     if required_tools:
         answer = "Câu hỏi này cần dữ liệu động từ: " + ", ".join(required_tools) + "."
     elif not_found_entities:
@@ -47,6 +52,13 @@ def answer_node(
             "Mình chưa tìm thấy "
             + ", ".join(not_found_entities)
             + f" trong Knowledge Base {str(state.get('kb_version') or '').upper()}."
+        )
+    elif unverified_geo_scopes:
+        answer = (
+            f"Knowledge Base {str(state.get('kb_version') or '').upper()} chưa có "
+            "địa điểm với quan hệ vị trí đủ tin cậy tại "
+            + ", ".join(unverified_geo_scopes)
+            + ". Cần bổ sung địa chỉ hoặc GeoArea đã xác minh."
         )
     elif missing_fields:
         answer = f"Mình cần bạn bổ sung: {', '.join(missing_fields)}."

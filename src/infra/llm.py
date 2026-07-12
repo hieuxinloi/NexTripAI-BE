@@ -21,6 +21,10 @@ Never create a reference token. Use only reference tokens that exist verbatim in
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
+Treat geographic relationships strictly: LOCATED_IN supports "nằm ở" or "thuộc";
+NEAR_AREA supports only "gần"; MENTIONS_GEO_AREA does not prove location and
+must be described as an unverified mention or omitted. Never upgrade a weaker
+relationship into LOCATED_IN.
 Retrieved references may represent places, dishes, activities, cities, or geographic areas.
 For an entity_detail with several verified facts, write a short overview followed
 by readable bullets for useful details such as address, cuisine, signature dishes,

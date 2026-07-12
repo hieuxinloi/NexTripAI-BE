@@ -247,3 +247,19 @@ def test_missing_v4_entity_is_reported_as_absent_data() -> None:
     )
 
     assert state["answer"] == "Mình chưa tìm thấy FLC trong Knowledge Base V4."
+
+
+def test_unverified_geo_scope_is_reported_as_data_gap() -> None:
+    state = answer_node(
+        {
+            "session_id": "missing-geo-v5",
+            "kb_version": "v5",
+            "answer_type": "entity_list",
+            "missing_fields": ["verified_geo_candidates:Tuy Phước"],
+            "facts": [],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert "chưa có địa điểm với quan hệ vị trí đủ tin cậy tại Tuy Phước" in state["answer"]
