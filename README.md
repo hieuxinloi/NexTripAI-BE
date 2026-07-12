@@ -86,5 +86,28 @@ Implemented endpoints:
 - `GET /health`
 - `POST /api/chat`
 
-The chat pipeline calls the KB over HTTP, optionally checks Google Weather API, and stores
+The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stores
 conversation messages in memory or Firestore. It never connects directly to Neo4j.
+
+Current chat orchestration:
+
+```text
+Frontend -> POST /api/chat -> Conversation Context Resolver
+                            -> TravelOrchestrator
+                               +-> GraphRAG Agent -> KB API -> Neo4j evidence
+                               +-> Weather Agent -> Open-Meteo assessment
+                            -> Answer Synthesizer -> grounded Vietnamese response
+```
+
+The orchestrator selects `graph_only`, `weather_only`, or `graph_and_weather`. GraphRAG and
+Weather run concurrently when both are required. The answer synthesizer receives the combined
+tool context once; if a dependency is unavailable, a deterministic response reports the missing
+tool without discarding successful evidence from the other branch.
+
+Agent production capabilities:
+
+- Multi-turn city context backed by the configured chat store.
+- Explicit tool routing, concurrent execution, timeout/error isolation, and clarification states.
+- Grounded synthesis with protected place/fact references and weather-aware recommendations.
+- Structured evidence, resolved context, missing fields, required tools, and node-level traces.
+- Bounded worker pool, input validation, persistence abstraction, health checks, and regression tests.
