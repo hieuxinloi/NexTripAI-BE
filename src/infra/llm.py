@@ -21,6 +21,7 @@ Never create a reference token. Use only reference tokens that exist verbatim in
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
+Retrieved references may represent places, dishes, activities, cities, or geographic areas.
 For an entity_detail with several verified facts, write a short overview followed
 by readable bullets for useful details such as address, cuisine, signature dishes,
 opening hours, rating, price, amenities, and suitability. Integrate every FACT

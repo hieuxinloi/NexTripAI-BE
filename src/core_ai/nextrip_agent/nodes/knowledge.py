@@ -11,7 +11,7 @@ from src.core_ai.nextrip_agent.constants import (
     KbVersion,
     TYPED_KB_VERSIONS,
 )
-from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload
+from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload, TypedTarget
 from src.core_ai.nextrip_agent.retrieval_plan import RetrievalRequest
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
@@ -189,8 +189,19 @@ def _knowledge_typed(
                 kb_version=kb_version,
             )
         )
+        if payload.error:
+            trace.extend(payload.trace)
+            return {
+                **state,
+                "evidence": [],
+                "facts": [],
+                "query_plan": payload.query_plan,
+                "error": payload.error.model_dump(),
+                "trace": trace,
+            }
+        candidates = _typed_candidates(payload)
         evidence = _attach_candidate_sources(
-            payload.recommendations or payload.entities,
+            candidates,
             payload,
         )
         trace.extend(payload.trace)
@@ -274,4 +285,26 @@ def _attach_candidate_sources(
             "source": sources_by_subject.get(candidate["place_id"], {}),
         }
         for candidate in candidates
+    ]
+
+
+def _typed_candidates(payload: TypedKbPayload) -> list[dict]:
+    if payload.recommendations:
+        return payload.recommendations
+    if payload.entities:
+        return payload.entities
+    return _target_candidates(payload.targets)
+
+
+def _target_candidates(targets: list[TypedTarget]) -> list[dict]:
+    return [
+        {
+            "place_id": target.target_id,
+            "name": target.name,
+            "entity_type": target.kind,
+            "category": target.kind,
+            "score": target.score,
+            "description": target.description,
+        }
+        for target in targets
     ]

@@ -17,11 +17,27 @@ class TypedCitation(BaseModel):
     url: str | None = None
 
 
+class TypedTarget(BaseModel):
+    target_id: str
+    kind: str
+    name: str
+    description: str | None = None
+    score: float = 0
+
+
+class TypedServiceError(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+    reason: str | None = None
+
+
 class TypedKbPayload(BaseModel):
     kb_version: str
     answer_type: str = "kb_retrieval"
     entities: list[dict[str, Any]] = Field(default_factory=list)
     recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    targets: list[TypedTarget] = Field(default_factory=list)
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[TypedCitation] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
@@ -30,6 +46,7 @@ class TypedKbPayload(BaseModel):
     constraint_results: list[dict[str, Any]] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
+    error: TypedServiceError | None = None
 
 
 class AgentResult(BaseModel):
