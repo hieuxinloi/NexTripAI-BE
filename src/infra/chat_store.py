@@ -109,6 +109,7 @@ class FirestoreChatStore:
             {
                 "role": role,
                 "content": content,
+                "city": city,
                 "metadata": metadata or {},
                 "created_at": self._firestore.SERVER_TIMESTAMP,
             }

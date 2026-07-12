@@ -15,7 +15,8 @@ async def health(request: Request) -> dict[str, object]:
         "status": "ok",
         "service": "nextrip-be",
         "kb_base_url": settings().nextrip_kb_base_url,
-        "weather": "configured" if request.app.state.weather_client.configured else "not_configured",
+        "weather": "ready",
+        "weather_provider": "open-meteo",
         "chat_store": request.app.state.chat_store.backend_name,
         "worker_pool": worker_pool.statistics(),
     }

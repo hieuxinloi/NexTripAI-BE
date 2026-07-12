@@ -6,13 +6,14 @@ from uuid import uuid4
 from loguru import logger
 
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
-from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.constants import TYPED_KB_VERSIONS
+from src.core_ai.nextrip_agent.conversation import resolve_conversation_context
+from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
+from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
 from src.infra.kb_client import KbClient
-from src.core_ai.nextrip_agent.weather import WeatherAgent, WeatherAssessment
 from src.infra.chat_store import ChatStore
-from src.infra.weather import GoogleWeatherClient, WeatherUnavailable
+from src.infra.weather import OpenMeteoWeatherClient
 
 DEFAULT_TOP_K = 5
 TYPED_QUERY_RESULT_CEILING = 20
@@ -35,52 +36,72 @@ def handle_chat(
     kb_client: KbClient,
     answer_generator: SupportsAnswerGeneration | None = None,
     *,
-    weather_client: GoogleWeatherClient | None = None,
+    weather_client: OpenMeteoWeatherClient | None = None,
     chat_store: ChatStore | None = None,
+    chat_history_limit: int = 8,
 ) -> ChatResponse:
     started_at = perf_counter()
     top_k = resolve_top_k(request)
     user_message_id = uuid4().hex
     assistant_message_id = uuid4().hex
+    history = _recent_messages(chat_store, request.session_id, chat_history_limit)
+    context = resolve_conversation_context(
+        message=request.message,
+        explicit_city=request.city,
+        history=history,
+    )
     _save_message(
         chat_store,
         request,
         user_message_id,
         "user",
         request.message,
+        city=context.city,
+        metadata={"context_city_source": context.city_source},
     )
     logger.info(
         "Chat turn start session_id={} city={} entity_types={} top_k={} message_len={}",
         request.session_id,
-        request.city or "-",
+        context.city or "-",
         request.entity_types or [],
         top_k,
         len(request.message),
     )
-    agent_result = run_nextrip_agent(
+    orchestration = TravelOrchestrator(kb_client, weather_client).run(
         message=request.message,
         session_id=request.session_id,
-        city=request.city,
+        city=context.city,
         entity_types=request.entity_types,
         top_k=top_k,
-        kb_client=kb_client,
         kb_version=request.kb_version,
-        answer_generator=answer_generator,
+        travel_date=request.travel_date,
+        include_weather=request.include_weather,
+        latitude=request.latitude,
+        longitude=request.longitude,
     )
-    weather, weather_trace = _run_weather(request, agent_result.required_tools, weather_client)
+    agent_result = orchestration.graph
+    weather = orchestration.weather
     if agent_result.error and weather is None:
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
-    required_tools = list(agent_result.required_tools)
-    answer = agent_result.answer
-    if weather is not None:
-        required_tools = [tool for tool in required_tools if tool != "weather"]
-        weather_answer = _weather_answer(weather)
-        if agent_result.required_tools and not evidence and not agent_result.facts:
-            answer = weather_answer
-        else:
-            answer = f"{answer}\n\n{weather_answer}"
-    trace = [*agent_result.trace, weather_trace]
+    synthesis = synthesize_answer(
+        question=request.message,
+        kb_version=request.kb_version,
+        graph=agent_result,
+        graph_used=orchestration.plan.run_graph,
+        weather=weather,
+        weather_requested=orchestration.plan.run_weather,
+        weather_trace=orchestration.weather_trace,
+        answer_generator=answer_generator,
+    )
+    answer = synthesis.answer
+    trace = [
+        context.trace_event(),
+        *orchestration.trace,
+        *agent_result.trace,
+        orchestration.weather_trace,
+        synthesis.trace,
+    ]
     logger.info(
         "Chat turn end session_id={} evidence_count={} result_ids={} answer_len={} elapsed_ms={}",
         request.session_id,
@@ -94,6 +115,11 @@ def handle_chat(
         message_id=assistant_message_id,
         answer=answer,
         intent=agent_result.answer_type,
+        orchestration_mode=orchestration.plan.mode.value,
+        resolved_context={
+            "city": context.city,
+            "city_source": context.city_source,
+        },
         kb_version=request.kb_version,
         facts=agent_result.facts,
         evidence=evidence,
@@ -103,7 +129,7 @@ def handle_chat(
         query_plan=agent_result.query_plan,
         matched_paths=agent_result.matched_paths,
         constraint_results=agent_result.constraint_results,
-        required_tools=required_tools,
+        required_tools=synthesis.unresolved_tools,
         weather=weather,
     )
     _save_message(
@@ -112,74 +138,19 @@ def handle_chat(
         assistant_message_id,
         "assistant",
         answer,
+        city=context.city,
         metadata={
             "kb_version": request.kb_version,
             "place_ids": [item.place_id for item in evidence],
             "weather_suitability": weather.suitability if weather else None,
+            "resolved_context": {
+                "city": context.city,
+                "city_source": context.city_source,
+            },
             "trace": trace,
         },
     )
     return response
-
-
-def _run_weather(
-    request: ChatRequest,
-    required_tools: list[str],
-    weather_client: GoogleWeatherClient | None,
-) -> tuple[WeatherAssessment | None, dict]:
-    should_run = WeatherAgent.should_run(
-        message=request.message,
-        travel_date=request.travel_date,
-        include_weather=request.include_weather,
-        required_tools=required_tools,
-    )
-    if not should_run:
-        return None, {"node": "weather", "status": "skipped"}
-    if weather_client is None:
-        return None, {
-            "node": "weather",
-            "status": "unavailable",
-            "reason": "Weather client is not configured.",
-        }
-    started_at = perf_counter()
-    try:
-        weather = WeatherAgent(weather_client).run(
-            message=request.message,
-            city=request.city,
-            travel_date=request.travel_date,
-            latitude=request.latitude,
-            longitude=request.longitude,
-        )
-    except WeatherUnavailable as exc:
-        return None, {
-            "node": "weather",
-            "status": "unavailable",
-            "reason": str(exc),
-            "elapsed_ms": int((perf_counter() - started_at) * 1000),
-        }
-    return weather, {
-        "node": "weather",
-        "status": "completed",
-        "suitability": weather.suitability,
-        "elapsed_ms": int((perf_counter() - started_at) * 1000),
-    }
-
-
-def _weather_answer(weather: WeatherAssessment) -> str:
-    temperature = ""
-    if weather.min_temperature_c is not None and weather.max_temperature_c is not None:
-        temperature = (
-            f", khoảng {weather.min_temperature_c:g}-{weather.max_temperature_c:g}°C"
-        )
-    rain = (
-        f", khả năng mưa {weather.precipitation_probability}%"
-        if weather.precipitation_probability is not None
-        else ""
-    )
-    return (
-        f"Thời tiết {weather.location} ngày {weather.forecast_date:%d/%m}: "
-        f"{weather.condition}{temperature}{rain}. {weather.advice}"
-    )
 
 
 def _save_message(
@@ -188,6 +159,7 @@ def _save_message(
     message_id: str,
     role: str,
     content: str,
+    city: str | None,
     metadata: dict | None = None,
 ) -> None:
     if chat_store is None:
@@ -199,7 +171,7 @@ def _save_message(
             role,
             content,
             user_id=request.user_id,
-            city=request.city,
+            city=city,
             metadata=metadata,
         )
     except Exception as exc:
@@ -209,3 +181,21 @@ def _save_message(
             role,
             exc.__class__.__name__,
         )
+
+
+def _recent_messages(
+    chat_store: ChatStore | None,
+    session_id: str,
+    limit: int,
+) -> list[dict]:
+    if chat_store is None:
+        return []
+    try:
+        return chat_store.recent_messages(session_id, limit)
+    except Exception as exc:
+        logger.exception(
+            "Chat history load failed session_id={} error_type={}",
+            session_id,
+            exc.__class__.__name__,
+        )
+        return []

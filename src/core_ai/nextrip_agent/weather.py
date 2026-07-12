@@ -6,7 +6,11 @@ import unicodedata
 
 from pydantic import BaseModel
 
-from src.infra.weather import GoogleWeatherClient, WeatherUnavailable
+from src.infra.weather import (
+    OpenMeteoWeatherClient,
+    WeatherLocationRequired,
+    WeatherUnavailable,
+)
 
 
 VIETNAM_TIMEZONE = timezone(timedelta(hours=7))
@@ -39,7 +43,8 @@ class WeatherAssessment(BaseModel):
     wind_gust_kph: float | None = None
     suitability: str
     advice: str
-    source: str = "Google Weather API"
+    source: str = "Open-Meteo"
+    source_url: str = "https://open-meteo.com/"
 
 
 def normalize_text(value: str) -> str:
@@ -52,7 +57,7 @@ def vietnam_today() -> date:
 
 
 class WeatherAgent:
-    def __init__(self, client: GoogleWeatherClient) -> None:
+    def __init__(self, client: OpenMeteoWeatherClient) -> None:
         self.client = client
 
     @staticmethod
@@ -87,7 +92,7 @@ class WeatherAgent:
         elif location is not None:
             location_name, latitude, longitude = location
         else:
-            raise WeatherUnavailable(
+            raise WeatherLocationRequired(
                 "Cần city hoặc latitude/longitude để kiểm tra thời tiết."
             )
         target_date = travel_date or _target_date(message)

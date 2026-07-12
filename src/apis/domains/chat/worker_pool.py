@@ -15,7 +15,7 @@ from src.apis.domains.chat.service import handle_chat
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
-from src.infra.weather import GoogleWeatherClient
+from src.infra.weather import OpenMeteoWeatherClient
 from src.shared.request_context import current_request_id
 
 
@@ -44,8 +44,9 @@ class ChatWorkerPool:
         worker_count: int,
         queue_capacity: int,
         handler: ChatHandler = handle_chat,
-        weather_client: GoogleWeatherClient | None = None,
+        weather_client: OpenMeteoWeatherClient | None = None,
         chat_store: ChatStore | None = None,
+        chat_history_limit: int = 8,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be positive")
@@ -56,6 +57,7 @@ class ChatWorkerPool:
         self._handler = handler
         self._weather_client = weather_client
         self._chat_store = chat_store
+        self._chat_history_limit = chat_history_limit
         self._send_stream: MemoryObjectSendStream[ChatJob] | None = None
         self._active_jobs = 0
 
@@ -173,6 +175,7 @@ class ChatWorkerPool:
                                 job.answer_generator,
                                 weather_client=self._weather_client,
                                 chat_store=self._chat_store,
+                                chat_history_limit=self._chat_history_limit,
                             )
                         job.result = await to_thread.run_sync(
                             handler,

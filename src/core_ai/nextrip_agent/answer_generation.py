@@ -48,3 +48,17 @@ class SupportsAnswerGeneration(Protocol):
         matched_paths: list[dict[str, Any]],
     ) -> str:
         ...
+
+
+class SupportsAnswerSynthesis(SupportsAnswerGeneration, Protocol):
+    def synthesize(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        evidence: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
+        matched_paths: list[dict[str, Any]],
+        weather: dict[str, Any] | None,
+    ) -> str:
+        ...

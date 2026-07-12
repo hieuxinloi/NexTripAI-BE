@@ -39,6 +39,7 @@ class EvidenceItem(BaseModel):
     distance_km: float | None = None
     source: dict[str, Any] = Field(default_factory=dict)
     graph_context: dict[str, Any] = Field(default_factory=dict)
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +47,8 @@ class ChatResponse(BaseModel):
     message_id: str
     answer: str
     intent: str = "kb_retrieval"
+    orchestration_mode: str = "graph_only"
+    resolved_context: dict[str, Any] = Field(default_factory=dict)
     kb_version: KbVersion = DEFAULT_KB_VERSION
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)

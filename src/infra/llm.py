@@ -12,8 +12,8 @@ from src.core_ai.nextrip_agent.answer_generation import fact_value_text
 from src.shared.logging import safe_text
 
 
-SYSTEM_INSTRUCTION = """You are the grounded answer generator for NexTripAI.
-Answer in natural Vietnamese using only the supplied GraphRAG context.
+SYSTEM_INSTRUCTION = """You are the grounded answer synthesizer for NexTripAI.
+Answer in natural Vietnamese using only the supplied GraphRAG and weather context.
 Never invent places, addresses, prices, opening hours, ratings, reasons, or sources.
 Place, city, and fact values are protected reference tokens such as [[PLACE_1]], [[CITY_1]], and [[FACT_1]].
 Use every PLACE reference at least once and every FACT reference exactly once. CITY references are optional. Never alter or explain a token.
@@ -21,6 +21,9 @@ Never create a reference token. Use only reference tokens that exist verbatim in
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
+When weather_assessment is present, include its forecast and suitability advice in the same
+answer. Connect weather to a place only when its supplied entity_type or category supports
+that conclusion. Do not invent whether a place is indoors, outdoors, open, or closed.
 Treat geographic relationships strictly: LOCATED_IN supports "nằm ở" or "thuộc";
 NEAR_AREA supports only "gần"; MENTIONS_GEO_AREA does not prove location and
 must be described as an unverified mention or omitted. Never upgrade a weaker
@@ -84,12 +87,51 @@ class GeminiAnswerGenerator:
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
     ) -> str:
+        return self._generate(
+            question=question,
+            answer_type=answer_type,
+            evidence=evidence,
+            facts=facts,
+            matched_paths=matched_paths,
+            weather=None,
+        )
+
+    def synthesize(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        evidence: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
+        matched_paths: list[dict[str, Any]],
+        weather: dict[str, Any] | None,
+    ) -> str:
+        return self._generate(
+            question=question,
+            answer_type=answer_type,
+            evidence=evidence,
+            facts=facts,
+            matched_paths=matched_paths,
+            weather=weather,
+        )
+
+    def _generate(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        evidence: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
+        matched_paths: list[dict[str, Any]],
+        weather: dict[str, Any] | None,
+    ) -> str:
         context, replacements = _protected_context(
             question=question,
             answer_type=answer_type,
             evidence=evidence,
             facts=facts,
             matched_paths=matched_paths,
+            weather=weather,
         )
         response = self._client.models.generate_content(
             model=self._model,
@@ -121,6 +163,7 @@ def _protected_context(
     evidence: list[dict[str, Any]],
     facts: list[dict[str, Any]],
     matched_paths: list[dict[str, Any]],
+    weather: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     replacements: dict[str, str] = {}
     place_references: dict[str, str] = {}
@@ -145,6 +188,7 @@ def _protected_context(
             "city": city_reference,
             "entity_type": place.get("entity_type"),
             "category": place.get("category"),
+            "attributes": place.get("attributes") or {},
         })
 
     protected_question = question
@@ -197,6 +241,7 @@ def _protected_context(
             "retrieved_places": protected_places,
             "verified_facts": protected_facts,
             "matched_graph_paths": protected_paths,
+            "weather_assessment": weather,
         },
         replacements,
     )

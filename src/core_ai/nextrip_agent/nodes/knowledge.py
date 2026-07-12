@@ -138,7 +138,7 @@ def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> Nex
                     "elapsed_ms": outcome.elapsed_ms,
                 }
             )
-            trace.extend(payload.trace)
+            trace.extend(_knowledge_trace(payload.trace))
         trace.append({"node": "knowledge", "status": "completed", "count": len(evidence)})
         logger.info(
             "NexTrip node knowledge completed session_id={} request_count={} evidence_count={}",
@@ -190,7 +190,7 @@ def _knowledge_typed(
             )
         )
         if payload.error:
-            trace.extend(payload.trace)
+            trace.extend(_knowledge_trace(payload.trace))
             return {
                 **state,
                 "evidence": [],
@@ -204,7 +204,7 @@ def _knowledge_typed(
             candidates,
             payload,
         )
-        trace.extend(payload.trace)
+        trace.extend(_knowledge_trace(payload.trace))
         trace.append(
             {
                 "node": "knowledge",
@@ -307,4 +307,11 @@ def _target_candidates(targets: list[TypedTarget]) -> list[dict]:
             "description": target.description,
         }
         for target in targets
+    ]
+
+
+def _knowledge_trace(events: list[dict]) -> list[dict]:
+    return [
+        {**event, "node": event.get("node") or "knowledge"}
+        for event in events
     ]

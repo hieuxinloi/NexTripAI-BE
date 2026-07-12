@@ -24,7 +24,6 @@ class Settings(BaseSettings):
     google_application_credentials: str | None = None
     google_cloud_project: str | None = None
     google_cloud_location: str = "us-central1"
-    google_weather_api_key: str | None = None
     weather_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     chat_store_backend: str = "memory"
     firestore_database: str = "(default)"
