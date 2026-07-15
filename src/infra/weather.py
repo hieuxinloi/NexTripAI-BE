@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from src.infra.resilience import CircuitBreaker, TtlCache, retry
+
 
 WEATHER_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
 DAILY_VARIABLES = ",".join((
@@ -74,9 +76,18 @@ class OpenMeteoWeatherClient:
         self,
         timeout_seconds: float = 8.0,
         client: httpx.Client | None = None,
+        retry_attempts: int = 2,
+        circuit_failure_threshold: int = 5,
+        circuit_recovery_seconds: float = 30.0,
     ) -> None:
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout_seconds, trust_env=False)
+        self._retry_attempts = retry_attempts
+        self._circuit = CircuitBreaker(
+            circuit_failure_threshold,
+            circuit_recovery_seconds,
+        )
+        self._cache: TtlCache[DailyForecast] = TtlCache()
 
     @property
     def configured(self) -> bool:
@@ -94,22 +105,39 @@ class OpenMeteoWeatherClient:
             raise WeatherUnavailable(
                 "Open-Meteo forecast supports today through the next 15 days."
             )
-        try:
+        cache_key = f"{latitude:.4f}:{longitude:.4f}:{target_date.isoformat()}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        def operation() -> httpx.Response:
             response = self.client.get(
-                WEATHER_ENDPOINT,
-                params={
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "daily": DAILY_VARIABLES,
-                    "timezone": "Asia/Ho_Chi_Minh",
-                    "start_date": target_date.isoformat(),
-                    "end_date": target_date.isoformat(),
-                },
-            )
+                    WEATHER_ENDPOINT,
+                    params={
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "daily": DAILY_VARIABLES,
+                        "timezone": "Asia/Ho_Chi_Minh",
+                        "start_date": target_date.isoformat(),
+                        "end_date": target_date.isoformat(),
+                    },
+                )
             response.raise_for_status()
-        except httpx.HTTPError as exc:
+            return response
+
+        try:
+            response = self._circuit.call(
+                lambda: retry(
+                    operation,
+                    attempts=self._retry_attempts,
+                    retryable=_is_retryable_weather_error,
+                )
+            )
+        except Exception as exc:
             raise WeatherUnavailable("Open-Meteo weather request failed.") from exc
-        return _daily_forecast(target_date, response.json().get("daily") or {})
+        forecast = _daily_forecast(target_date, response.json().get("daily") or {})
+        self._cache.set(cache_key, forecast, 10 * 60)
+        return forecast
 
     def close(self) -> None:
         if self._owns_client:
@@ -154,3 +182,16 @@ def _number_value(data: dict[str, Any], key: str, index: int) -> float | None:
 def _integer_value(data: dict[str, Any], key: str, index: int) -> int | None:
     value = _number_value(data, key, index)
     return round(value) if value is not None else None
+
+
+def _is_retryable_weather_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
+        408,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }

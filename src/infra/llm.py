@@ -10,6 +10,7 @@ from loguru import logger
 from src.config import Settings
 from src.core_ai.nextrip_agent.answer_generation import fact_value_text
 from src.shared.logging import safe_text
+from src.shared.telemetry import record_llm_usage, span
 
 
 SYSTEM_INSTRUCTION = """You are the grounded answer synthesizer for NexTripAI.
@@ -50,6 +51,11 @@ class GeminiAnswerGenerator:
         self._types = types
         self._model = app_settings.gemini_model
         self._temperature = app_settings.answer_temperature
+        self._input_cost_per_million = app_settings.gemini_input_cost_per_million_usd
+        self._output_cost_per_million = app_settings.gemini_output_cost_per_million_usd
+        http_options = types.HttpOptions(
+            timeout=int(app_settings.gemini_timeout_seconds * 1000)
+        )
         if app_settings.google_genai_use_vertexai:
             if not app_settings.google_cloud_project:
                 raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for Vertex AI")
@@ -69,9 +75,13 @@ class GeminiAnswerGenerator:
                 project=app_settings.google_cloud_project,
                 location=app_settings.google_cloud_location,
                 credentials=client_credentials,
+                http_options=http_options,
             )
         elif app_settings.google_api_key:
-            self._client = genai.Client(api_key=app_settings.google_api_key)
+            self._client = genai.Client(
+                api_key=app_settings.google_api_key,
+                http_options=http_options,
+            )
         else:
             raise RuntimeError("Gemini answer generation is enabled but authentication is missing")
 
@@ -133,14 +143,15 @@ class GeminiAnswerGenerator:
             matched_paths=matched_paths,
             weather=weather,
         )
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=json.dumps(context, ensure_ascii=False, separators=(",", ":")),
-            config=self._types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=self._temperature,
-            ),
-        )
+        with span("gemini.generate_answer", model=self._model, answer_type=answer_type):
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+                config=self._types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=self._temperature,
+                ),
+            )
         raw_answer = (response.text or "").strip()
         raw_answer = _ensure_single_entity_reference(
             raw_answer,
@@ -148,11 +159,24 @@ class GeminiAnswerGenerator:
             evidence=evidence,
         )
         grounded_answer = _restore_references(raw_answer, replacements)
-        logger.info(
-            "NexTrip answer LLM output raw={} grounded={}",
-            safe_text(raw_answer, 4000),
-            safe_text(grounded_answer, 4000),
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        record_llm_usage(
+            self._model,
+            input_tokens,
+            output_tokens,
+            input_cost_per_million=self._input_cost_per_million,
+            output_cost_per_million=self._output_cost_per_million,
         )
+        logger.info(
+            "NexTrip answer generated model={} input_tokens={} output_tokens={} answer_len={}",
+            self._model,
+            input_tokens,
+            output_tokens,
+            len(grounded_answer),
+        )
+        logger.debug("NexTrip grounded answer preview={}", safe_text(grounded_answer, 500))
         return grounded_answer
 
 

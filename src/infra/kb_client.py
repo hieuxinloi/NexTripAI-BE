@@ -8,13 +8,38 @@ from loguru import logger
 
 from src.shared.logging import safe_text
 from src.shared.request_context import current_request_id
+from src.infra.resilience import CircuitBreaker, TtlCache, retry
 
 
 class KbClient:
-    def __init__(self, base_url: str, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        client: httpx.Client | None = None,
+        *,
+        timeout_seconds: float = 25.0,
+        auth_mode: str = "none",
+        auth_audience: str | None = None,
+        retry_attempts: int = 2,
+        circuit_failure_threshold: int = 5,
+        circuit_recovery_seconds: float = 30.0,
+    ):
         self.base_url = base_url.rstrip("/")
-        self._client = client if client is not None else httpx.Client(trust_env=False)
+        self._client = client if client is not None else httpx.Client(
+            trust_env=False,
+            timeout=timeout_seconds,
+        )
         self._owns_client = client is None
+        self._timeout = timeout_seconds
+        self._auth_mode = auth_mode
+        self._auth_audience = auth_audience or self.base_url
+        self._retry_attempts = retry_attempts
+        self._circuit = CircuitBreaker(
+            circuit_failure_threshold,
+            circuit_recovery_seconds,
+        )
+        self._token_cache: TtlCache[str] = TtlCache()
+        self._health_cache: TtlCache[dict[str, Any]] = TtlCache()
 
     def close(self) -> None:
         if self._owns_client:
@@ -34,7 +59,7 @@ class KbClient:
             "entity_types": entity_types,
             "top_k": top_k,
         }
-        return self._post("/api/kb/search", payload, timeout=30.0)
+        return self._post("/api/kb/search", payload)
 
     def answer(
         self,
@@ -50,16 +75,35 @@ class KbClient:
             "entity_types": entity_types,
             "top_k": top_k,
         }
-        return self._post("/api/kb/answer", payload, timeout=60.0)
+        return self._post("/api/kb/answer", payload)
 
     def query_typed(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict[str, Any]:
         return self._post(
             "/api/kb/query",
             {"query": query, "kb_version": kb_version, "top_k": top_k},
-            timeout=60.0,
         )
 
-    def _post(self, path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    def readiness(self, *, force: bool = False) -> dict[str, Any]:
+        if not force:
+            cached = self._health_cache.get("ready")
+            if cached is not None:
+                return cached
+        response = self._client.get(
+            f"{self.base_url}/ready",
+            headers=self._headers(),
+            timeout=min(self._timeout, 5.0),
+        )
+        response.raise_for_status()
+        data = response.json()
+        self._health_cache.set("ready", data, 5.0)
+        return data
+
+    def ready_versions(self) -> set[str]:
+        data = self.readiness()
+        versions = data.get("ready_versions") or []
+        return {str(version) for version in versions}
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         started_at = perf_counter()
         logger.info(
             "KB client request start path={} query={!r} city={} entity_types={} top_k={}",
@@ -70,13 +114,23 @@ class KbClient:
             payload.get("top_k"),
         )
         try:
-            response = self._client.post(
-                f"{self.base_url}{path}",
-                json=payload,
-                headers={"X-Request-ID": current_request_id()},
-                timeout=timeout,
+            def operation() -> httpx.Response:
+                response = self._client.post(
+                    f"{self.base_url}{path}",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=self._timeout,
+                )
+                response.raise_for_status()
+                return response
+
+            response = self._circuit.call(
+                lambda: retry(
+                    operation,
+                    attempts=self._retry_attempts,
+                    retryable=_is_retryable,
+                )
             )
-            response.raise_for_status()
             data = response.json()
         except Exception as exc:
             logger.exception(
@@ -95,3 +149,36 @@ class KbClient:
             int((perf_counter() - started_at) * 1000),
         )
         return data
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"X-Request-ID": current_request_id()}
+        if self._auth_mode == "none":
+            return headers
+        if self._auth_mode != "google_oidc":
+            raise RuntimeError(f"Unsupported KB auth mode: {self._auth_mode}")
+        token = self._token_cache.get(self._auth_audience)
+        if token is None:
+            try:
+                from google.auth.transport.requests import Request
+                from google.oauth2 import id_token
+            except ImportError as exc:
+                raise RuntimeError(
+                    "KB_AUTH_MODE=google_oidc requires google-auth."
+                ) from exc
+            token = id_token.fetch_id_token(Request(), self._auth_audience)
+            self._token_cache.set(self._auth_audience, token, 45 * 60)
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
+        408,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }

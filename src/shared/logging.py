@@ -27,7 +27,7 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
 
-def configure_logging(*, service: str, level: str = "INFO") -> None:
+def configure_logging(*, service: str, level: str = "INFO", serialize: bool = False) -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     logger.remove()
@@ -39,6 +39,7 @@ def configure_logging(*, service: str, level: str = "INFO") -> None:
         colorize=sys.stderr.isatty(),
         backtrace=False,
         diagnose=False,
+        serialize=serialize,
     )
     handler = InterceptHandler()
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
