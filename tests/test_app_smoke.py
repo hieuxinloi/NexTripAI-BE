@@ -10,6 +10,28 @@ class FailingKbClient:
         raise RuntimeError("KB is down")
 
 
+class AvailableTypedKbClient:
+    def query_typed(self, *, query, top_k, kb_version):
+        return {
+            "kb_version": kb_version,
+            "answer_type": "recommendation",
+            "recommendations": [{
+                "place_id": "attr_qn_001",
+                "name": "Kỳ Co",
+                "city": "Quy Nhơn",
+                "entity_type": "attraction",
+            }],
+            "evidence": [],
+            "facts": [],
+            "missing_fields": [],
+            "query_plan": {},
+            "matched_paths": [],
+            "constraint_results": [],
+            "required_tools": [],
+            "trace": [],
+        }
+
+
 def test_app_exposes_health() -> None:
     with TestClient(create_app()) as client:
         response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
@@ -22,6 +44,7 @@ def test_app_exposes_health() -> None:
 def test_chat_returns_retryable_service_error_when_kb_is_down() -> None:
     app = create_app()
     with TestClient(app) as client:
+        expected_version = app.state.settings.active_kb_version.upper()
         app.state.kb_client = FailingKbClient()
         response = client.post(
             "/api/chat",
@@ -29,12 +52,15 @@ def test_chat_returns_retryable_service_error_when_kb_is_down() -> None:
         )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Knowledge Base V3 is temporarily unavailable."}
+    assert response.json() == {
+        "detail": f"Knowledge Base {expected_version} is temporarily unavailable."
+    }
 
 
 def test_stream_emits_structured_error_when_kb_is_down() -> None:
     app = create_app()
     with TestClient(app) as client:
+        expected_version = app.state.settings.active_kb_version.upper()
         app.state.kb_client = FailingKbClient()
         response = client.post(
             "/api/chat/stream",
@@ -45,7 +71,23 @@ def test_stream_emits_structured_error_when_kb_is_down() -> None:
     assert response.status_code == 200
     assert "event: accepted" in response.text
     assert "event: error" in response.text
-    assert "Knowledge Base V3 is temporarily unavailable." in response.text
+    assert f"Knowledge Base {expected_version} is temporarily unavailable." in response.text
+
+
+def test_chat_does_not_render_graph_fallback_without_gemini() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = AvailableTypedKbClient()
+        app.state.answer_generator = None
+        response = client.post(
+            "/api/chat",
+            json={"message": "Gợi ý điểm tham quan", "session_id": "no-gemini-session"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Gemini answer generation is temporarily unavailable."
+    }
 
 
 def test_session_history_and_delete_are_scoped_to_authenticated_user() -> None:

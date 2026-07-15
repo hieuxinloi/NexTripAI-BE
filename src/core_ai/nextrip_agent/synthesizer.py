@@ -22,6 +22,10 @@ class SynthesisResult:
     unresolved_tools: list[str]
 
 
+class AnswerGenerationUnavailableError(RuntimeError):
+    """Raised when graph evidence cannot be rendered without Gemini."""
+
+
 def synthesize_answer(
     *,
     question: str,
@@ -39,6 +43,12 @@ def synthesize_answer(
     elif weather_requested and weather_trace.get("status") == "unavailable":
         if "weather" not in unresolved_tools:
             unresolved_tools.append("weather")
+
+    has_graph_context = graph_used and bool(graph.evidence or graph.facts)
+    if has_graph_context and answer_generator is None:
+        raise AnswerGenerationUnavailableError(
+            "Gemini answer generation is temporarily unavailable."
+        )
 
     can_use_llm = (
         answer_generator is not None
@@ -91,8 +101,16 @@ def synthesize_answer(
                 "NexTrip answer synthesis failed error_type={}",
                 exc.__class__.__name__,
             )
+            if has_graph_context:
+                raise AnswerGenerationUnavailableError(
+                    "Gemini answer generation is temporarily unavailable."
+                ) from exc
             fallback_reason = exc.__class__.__name__
         else:
+            if has_graph_context:
+                raise AnswerGenerationUnavailableError(
+                    "Gemini answer generation is temporarily unavailable."
+                )
             fallback_reason = "synthesizer_not_supported"
     else:
         fallback_reason = "llm_not_available_or_context_incomplete"

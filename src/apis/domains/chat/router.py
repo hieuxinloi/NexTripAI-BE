@@ -16,6 +16,7 @@ from src.apis.domains.chat.service import KnowledgeBaseUnavailableError
 from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.infra.kb_client import KbClient
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
+from src.core_ai.nextrip_agent.synthesizer import AnswerGenerationUnavailableError
 from src.config import Settings
 from src.infra.chat_store import ChatStore
 from src.security.auth import Principal, current_principal
@@ -169,6 +170,8 @@ async def _run_worker(request: AuthenticatedChatRequest, http_request: Request) 
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Chat processing timed out.") from exc
     except KnowledgeBaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AnswerGenerationUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

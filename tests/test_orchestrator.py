@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from src.core_ai.nextrip_agent.orchestrator import (
     OrchestrationMode,
     TravelOrchestrator,
     build_orchestration_plan,
 )
 from src.core_ai.nextrip_agent.schemas import AgentResult
-from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
+from src.core_ai.nextrip_agent.synthesizer import (
+    AnswerGenerationUnavailableError,
+    synthesize_answer,
+)
 from src.core_ai.nextrip_agent.weather import WeatherAssessment
 from src.infra.weather import DailyForecast
 
@@ -80,6 +85,14 @@ class FakeSynthesizer:
     def synthesize(self, **kwargs):
         self.calls.append(kwargs)
         return "Mỹ Khê phù hợp tham quan; thời tiết có mây và ít khả năng mưa."
+
+
+class FailingSynthesizer:
+    def generate(self, **kwargs):
+        raise RuntimeError("Gemini unavailable")
+
+    def synthesize(self, **kwargs):
+        raise RuntimeError("Gemini unavailable")
 
 
 def test_orchestrator_plans_graph_only() -> None:
@@ -177,6 +190,35 @@ def test_synthesizer_receives_graph_and_weather_context() -> None:
     assert result.trace["generator"] == "llm_grounded_combined"
     assert result.trace["sources"] == ["graphrag", "weather"]
     assert generator.calls[0]["weather"]["suitability"] == "suitable"
+
+
+@pytest.mark.parametrize("generator", [None, FailingSynthesizer()])
+def test_synthesizer_does_not_render_graph_fallback_without_gemini(generator) -> None:
+    graph = AgentResult(
+        answer="Template answer from Neo4j",
+        answer_type="recommendation",
+        evidence=[{
+            "place_id": "attr_dn_001",
+            "name": "Bãi biển Mỹ Khê",
+            "city": "Đà Nẵng",
+            "entity_type": "attraction",
+        }],
+    )
+
+    with pytest.raises(
+        AnswerGenerationUnavailableError,
+        match="Gemini answer generation is temporarily unavailable",
+    ):
+        synthesize_answer(
+            question="Gợi ý địa điểm ở Đà Nẵng",
+            kb_version="v5",
+            graph=graph,
+            graph_used=True,
+            weather=None,
+            weather_requested=False,
+            weather_trace={"node": "weather", "status": "skipped"},
+            answer_generator=generator,
+        )
 
 
 def test_synthesizer_reports_unavailable_requested_weather() -> None:
