@@ -1,0 +1,33 @@
+name: Deploy Cloud Run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build image
+        run: |
+          IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY }}/nextripai-be:${{ github.sha }}"
+          gcloud builds submit --project "${{ vars.GCP_PROJECT_ID }}" --tag "$IMAGE" .
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Deploy Firebase-protected backend
+        run: |
+          gcloud run deploy "${{ vars.CLOUD_RUN_SERVICE }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --image "$IMAGE" \
+            --service-account "${{ vars.RUNTIME_SERVICE_ACCOUNT }}" \
+            --allow-unauthenticated \
+            --set-env-vars "ENVIRONMENT=production,LOG_JSON=true,AUTH_MODE=firebase,FIREBASE_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},CHAT_STORE_BACKEND=firestore,ALLOW_CLIENT_KB_VERSION=false,KB_AUTH_MODE=google_oidc,NEXTRIP_KB_BASE_URL=${{ vars.KB_CLOUD_RUN_URL }},KB_AUTH_AUDIENCE=${{ vars.KB_CLOUD_RUN_URL }},ACTIVE_KB_VERSION=v3"
