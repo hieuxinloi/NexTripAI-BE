@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from src.infra.weather import (
     OpenMeteoWeatherClient,
     WeatherLocationRequired,
-    WeatherUnavailable,
 )
 
 

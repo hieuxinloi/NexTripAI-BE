@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
-
 from src.apis.domains.chat.schemas import ChatRequest
 from src.apis.domains.chat.service import handle_chat
 from src.core_ai.nextrip_agent.conversation import resolve_conversation_context
@@ -66,6 +64,9 @@ def test_weather_follow_up_inherits_city_from_session() -> None:
     assert response.resolved_context == {
         "city": "Quy Nhơn",
         "city_source": "conversation_history",
+        "travel_date": None,
+        "travel_date_source": None,
+        "recent_place_ids": [],
     }
     assert response.weather is not None
     assert response.weather.location == "Quy Nhơn"

@@ -29,4 +29,40 @@ def test_chat_returns_retryable_service_error_when_kb_is_down() -> None:
         )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Knowledge Base is temporarily unavailable."}
+    assert response.json() == {"detail": "Knowledge Base V3 is temporarily unavailable."}
+
+
+def test_stream_emits_structured_error_when_kb_is_down() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = FailingKbClient()
+        response = client.post(
+            "/api/chat/stream",
+            headers={"Idempotency-Key": "request-12345"},
+            json={"message": "Goi y cafe", "session_id": "stream-session"},
+        )
+
+    assert response.status_code == 200
+    assert "event: accepted" in response.text
+    assert "event: error" in response.text
+    assert "Knowledge Base V3 is temporarily unavailable." in response.text
+
+
+def test_session_history_and_delete_are_scoped_to_authenticated_user() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.chat_store.save_message(
+            "owned-session",
+            "message-1",
+            "user",
+            "Xin chao",
+            user_id="local-user",
+        )
+        history = client.get("/api/sessions/owned-session/messages")
+        deleted = client.delete("/api/sessions/owned-session")
+        empty = client.get("/api/sessions/owned-session/messages")
+
+    assert history.status_code == 200
+    assert history.json()["messages"][0]["content"] == "Xin chao"
+    assert deleted.json()["deleted"] is True
+    assert empty.json()["messages"] == []

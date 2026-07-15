@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Protocol
 
@@ -23,7 +23,33 @@ class ChatStore(Protocol):
         metadata: dict[str, Any] | None = None,
     ) -> None: ...
 
-    def recent_messages(self, session_id: str, limit: int) -> list[dict[str, Any]]: ...
+    def recent_messages(
+        self,
+        session_id: str,
+        limit: int,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def delete_session(self, session_id: str, *, user_id: str) -> bool: ...
+
+    def get_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    def save_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        response: dict[str, Any],
+        *,
+        user_id: str,
+        ttl_seconds: int,
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -33,6 +59,8 @@ class InMemoryChatStore:
 
     def __init__(self) -> None:
         self._messages: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._session_users: dict[str, str] = {}
+        self._idempotency: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = Lock()
 
     def save_message(
@@ -56,11 +84,75 @@ class InMemoryChatStore:
             "created_at": datetime.now(timezone.utc),
         }
         with self._lock:
+            self._claim_or_check(session_id, user_id)
             self._messages[session_id].append(item)
 
-    def recent_messages(self, session_id: str, limit: int) -> list[dict[str, Any]]:
+    def recent_messages(
+        self,
+        session_id: str,
+        limit: int,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         with self._lock:
+            self._check_owner(session_id, user_id)
             return [dict(item) for item in self._messages.get(session_id, [])[-limit:]]
+
+    def delete_session(self, session_id: str, *, user_id: str) -> bool:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            existed = session_id in self._messages or session_id in self._session_users
+            self._messages.pop(session_id, None)
+            self._session_users.pop(session_id, None)
+            for cache_key in [key for key in self._idempotency if key[0] == session_id]:
+                self._idempotency.pop(cache_key, None)
+            return existed
+
+    def get_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            item = self._idempotency.get((session_id, key))
+            if item is None:
+                return None
+            if item["expires_at"] <= datetime.now(timezone.utc):
+                self._idempotency.pop((session_id, key), None)
+                return None
+            return dict(item["response"])
+
+    def save_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        response: dict[str, Any],
+        *,
+        user_id: str,
+        ttl_seconds: int,
+    ) -> None:
+        with self._lock:
+            self._claim_or_check(session_id, user_id)
+            self._idempotency[(session_id, key)] = {
+                "response": dict(response),
+                "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+            }
+
+    def _claim_or_check(self, session_id: str, user_id: str | None) -> None:
+        if user_id is None:
+            return
+        owner = self._session_users.get(session_id)
+        if owner is not None and owner != user_id:
+            raise PermissionError("Session belongs to another user")
+        self._session_users.setdefault(session_id, user_id)
+
+    def _check_owner(self, session_id: str, user_id: str | None) -> None:
+        owner = self._session_users.get(session_id)
+        if user_id is not None and owner is not None and owner != user_id:
+            raise PermissionError("Session belongs to another user")
 
     def close(self) -> None:
         return None
@@ -97,6 +189,7 @@ class FirestoreChatStore:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         session = self._sessions.document(session_id)
+        self._check_owner(session_id, user_id)
         session.set(
             {
                 "user_id": user_id,
@@ -115,7 +208,14 @@ class FirestoreChatStore:
             }
         )
 
-    def recent_messages(self, session_id: str, limit: int) -> list[dict[str, Any]]:
+    def recent_messages(
+        self,
+        session_id: str,
+        limit: int,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._check_owner(session_id, user_id)
         query = (
             self._sessions.document(session_id)
             .collection("messages")
@@ -128,6 +228,80 @@ class FirestoreChatStore:
         ]
         rows.reverse()
         return rows
+
+    def delete_session(self, session_id: str, *, user_id: str) -> bool:
+        session = self._sessions.document(session_id)
+        snapshot = session.get()
+        if not snapshot.exists:
+            return False
+        self._check_owner(session_id, user_id, snapshot.to_dict())
+        self._delete_collection(session.collection("messages"))
+        self._delete_collection(session.collection("idempotency"))
+        session.delete()
+        return True
+
+    def get_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        session = self._sessions.document(session_id)
+        self._check_owner(session_id, user_id)
+        snapshot = session.collection("idempotency").document(key).get()
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict() or {}
+        expires_at = data.get("expires_at")
+        if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            snapshot.reference.delete()
+            return None
+        response = data.get("response")
+        return dict(response) if isinstance(response, dict) else None
+
+    def save_idempotent_response(
+        self,
+        session_id: str,
+        key: str,
+        response: dict[str, Any],
+        *,
+        user_id: str,
+        ttl_seconds: int,
+    ) -> None:
+        session = self._sessions.document(session_id)
+        self._check_owner(session_id, user_id)
+        session.collection("idempotency").document(key).set({
+            "response": response,
+            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+            "created_at": self._firestore.SERVER_TIMESTAMP,
+        })
+
+    def _check_owner(
+        self,
+        session_id: str,
+        user_id: str | None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if user_id is None:
+            return
+        if data is None:
+            snapshot = self._sessions.document(session_id).get()
+            if not snapshot.exists:
+                return
+            data = snapshot.to_dict() or {}
+        owner = data.get("user_id")
+        if owner is not None and owner != user_id:
+            raise PermissionError("Session belongs to another user")
+
+    @staticmethod
+    def _delete_collection(collection: Any, batch_size: int = 100) -> None:
+        while True:
+            documents = list(collection.limit(batch_size).stream())
+            if not documents:
+                return
+            for document in documents:
+                document.reference.delete()
 
     def close(self) -> None:
         close = getattr(self._client, "close", None)

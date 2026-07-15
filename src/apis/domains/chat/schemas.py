@@ -5,18 +5,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from src.core_ai.nextrip_agent.constants import DEFAULT_KB_VERSION, KbVersion
+from src.core_ai.nextrip_agent.constants import KbVersion
 from src.core_ai.nextrip_agent.weather import WeatherAssessment
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: str = Field(..., min_length=1, max_length=128)
-    user_id: str | None = Field(default=None, max_length=128)
     city: str | None = Field(default=None, max_length=80)
     entity_types: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
-    kb_version: KbVersion = DEFAULT_KB_VERSION
+    kb_version: KbVersion = "v3"
     travel_date: date | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
@@ -27,6 +26,10 @@ class ChatRequest(BaseModel):
         if (self.latitude is None) != (self.longitude is None):
             raise ValueError("latitude and longitude must be provided together")
         return self
+
+
+class AuthenticatedChatRequest(ChatRequest):
+    user_id: str = Field(..., min_length=1, max_length=128)
 
 
 class EvidenceItem(BaseModel):
@@ -49,7 +52,7 @@ class ChatResponse(BaseModel):
     intent: str = "kb_retrieval"
     orchestration_mode: str = "graph_only"
     resolved_context: dict[str, Any] = Field(default_factory=dict)
-    kb_version: KbVersion = DEFAULT_KB_VERSION
+    kb_version: KbVersion = "v3"
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)
@@ -61,3 +64,17 @@ class ChatResponse(BaseModel):
     constraint_results: list[dict[str, Any]] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
     weather: WeatherAssessment | None = None
+
+
+class ChatMessage(BaseModel):
+    message_id: str
+    role: str
+    content: str
+    city: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: Any | None = None
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    messages: list[ChatMessage] = Field(default_factory=list)

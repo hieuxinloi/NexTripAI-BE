@@ -41,14 +41,21 @@ def handle_chat(
     chat_history_limit: int = 8,
 ) -> ChatResponse:
     started_at = perf_counter()
+    user_id = getattr(request, "user_id", None)
     top_k = resolve_top_k(request)
     user_message_id = uuid4().hex
     assistant_message_id = uuid4().hex
-    history = _recent_messages(chat_store, request.session_id, chat_history_limit)
+    history = _recent_messages(
+        chat_store,
+        request.session_id,
+        chat_history_limit,
+        user_id=user_id,
+    )
     context = resolve_conversation_context(
         message=request.message,
         explicit_city=request.city,
         history=history,
+        explicit_travel_date=request.travel_date,
     )
     _save_message(
         chat_store,
@@ -57,7 +64,10 @@ def handle_chat(
         "user",
         request.message,
         city=context.city,
-        metadata={"context_city_source": context.city_source},
+        metadata={
+            "context_city_source": context.city_source,
+            "travel_date": request.travel_date.isoformat() if request.travel_date else None,
+        },
     )
     logger.info(
         "Chat turn start session_id={} city={} entity_types={} top_k={} message_len={}",
@@ -74,7 +84,7 @@ def handle_chat(
         entity_types=request.entity_types,
         top_k=top_k,
         kb_version=request.kb_version,
-        travel_date=request.travel_date,
+        travel_date=request.travel_date or context.travel_date,
         include_weather=request.include_weather,
         latitude=request.latitude,
         longitude=request.longitude,
@@ -116,10 +126,7 @@ def handle_chat(
         answer=answer,
         intent=agent_result.answer_type,
         orchestration_mode=orchestration.plan.mode.value,
-        resolved_context={
-            "city": context.city,
-            "city_source": context.city_source,
-        },
+        resolved_context=context.to_dict(),
         kb_version=request.kb_version,
         facts=agent_result.facts,
         evidence=evidence,
@@ -143,10 +150,10 @@ def handle_chat(
             "kb_version": request.kb_version,
             "place_ids": [item.place_id for item in evidence],
             "weather_suitability": weather.suitability if weather else None,
-            "resolved_context": {
-                "city": context.city,
-                "city_source": context.city_source,
-            },
+            "travel_date": (request.travel_date or context.travel_date).isoformat()
+            if (request.travel_date or context.travel_date)
+            else None,
+            "resolved_context": context.to_dict(),
             "trace": trace,
         },
     )
@@ -170,7 +177,7 @@ def _save_message(
             message_id,
             role,
             content,
-            user_id=request.user_id,
+            user_id=getattr(request, "user_id", None),
             city=city,
             metadata=metadata,
         )
@@ -187,11 +194,13 @@ def _recent_messages(
     chat_store: ChatStore | None,
     session_id: str,
     limit: int,
+    *,
+    user_id: str | None = None,
 ) -> list[dict]:
     if chat_store is None:
         return []
     try:
-        return chat_store.recent_messages(session_id, limit)
+        return chat_store.recent_messages(session_id, limit, user_id=user_id)
     except Exception as exc:
         logger.exception(
             "Chat history load failed session_id={} error_type={}",
