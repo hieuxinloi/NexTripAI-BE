@@ -83,8 +83,12 @@ python -m uvicorn src.app:app --reload --port 8000
 
 Implemented endpoints:
 
+- `GET /live` and `GET /ready`
 - `GET /health`
 - `POST /api/chat`
+- `POST /api/chat/stream` (SSE events: `accepted`, `heartbeat`, `result`, `error`)
+- `GET /api/sessions/{session_id}/messages`
+- `DELETE /api/sessions/{session_id}`
 
 The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stores
 conversation messages in memory or Firestore. It never connects directly to Neo4j.
@@ -111,3 +115,12 @@ Agent production capabilities:
 - Grounded synthesis with protected place/fact references and weather-aware recommendations.
 - Structured evidence, resolved context, missing fields, required tools, and node-level traces.
 - Bounded worker pool, input validation, persistence abstraction, health checks, and regression tests.
+- Firebase ID-token verification, per-instance rate limiting, idempotent chat retries, and session ownership.
+- Cloud Run OIDC authentication for private BE-to-KB calls, retry/cache/circuit breaking, and OpenTelemetry.
+
+For Cloud Run, deploy KB with `--no-allow-unauthenticated`, grant the BE runtime service account
+`roles/run.invoker`, then set `KB_AUTH_MODE=google_oidc`. Deploy BE with
+`--allow-unauthenticated` so Firebase tokens can reach the app-level verifier. Cloud Run services
+must use their attached service identities through ADC instead of a JSON key file.
+The included rate limiter is per BE instance; use Cloud Armor or an API gateway for a global
+production quota across multiple Cloud Run instances.
