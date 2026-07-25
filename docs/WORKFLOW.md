@@ -127,10 +127,8 @@ Minimum env:
 ```dotenv
 NEXTRIP_KB_BASE_URL=http://localhost:8010
 WEATHER_PROVIDER=mock
-GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_APPLICATION_CREDENTIALS=../NexTripAI-KB/corded-gear-500002-f7-53f3807db6de.json
-GOOGLE_CLOUD_PROJECT=corded-gear-500002-f7
-GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_API_KEY=your-google-ai-studio-key
+GEMINI_MODEL=gemini-flash-latest
 ```
 
 Keep config local-first. Do not add Key Vault/Azure infra for this do an.

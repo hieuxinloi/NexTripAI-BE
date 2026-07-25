@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import re
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_KB_VERSION_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 
 
 class Settings(BaseSettings):
@@ -20,16 +24,13 @@ class Settings(BaseSettings):
     ai_worker_count: int = Field(default=5, ge=1, le=32)
     ai_queue_capacity: int = Field(default=100, ge=1, le=10_000)
     answer_generation_mode: str = "template"
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-latest"
     answer_temperature: float = 0.2
     gemini_timeout_seconds: float = Field(default=35.0, gt=0, le=60)
     gemini_input_cost_per_million_usd: float = Field(default=0.0, ge=0)
     gemini_output_cost_per_million_usd: float = Field(default=0.0, ge=0)
     google_api_key: str | None = None
-    google_genai_use_vertexai: bool = False
-    google_application_credentials: str | None = None
     google_cloud_project: str | None = None
-    google_cloud_location: str = "us-central1"
     weather_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     chat_store_backend: str = "memory"
     firestore_database: str = "(default)"
@@ -39,7 +40,7 @@ class Settings(BaseSettings):
     firebase_project_id: str | None = None
     kb_auth_mode: Literal["none", "google_oidc"] = "none"
     kb_auth_audience: str | None = None
-    active_kb_version: Literal["v1", "v2", "v3", "v4", "v5"] = "v3"
+    active_kb_version: str = Field(default="v3", pattern=r"^v[1-9][0-9]*$")
     kb_fallback_versions: str = "v1"
     allow_client_kb_version: bool = True
     kb_request_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
             for item in self.kb_fallback_versions.split(",")
             if item.strip()
         ]
-        return [item for item in versions if item in {"v1", "v2", "v3", "v4", "v5"}]
+        return [item for item in versions if _KB_VERSION_PATTERN.fullmatch(item)]
 
 
 @lru_cache

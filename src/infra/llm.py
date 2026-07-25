@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
 from typing import Any
 
@@ -22,8 +21,14 @@ Never create a reference token. Use only reference tokens that exist verbatim in
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
+When the user asks for an itinerary or a one-day plan, turn the retrieved order into
+a practical suggested sequence. Group it into morning and afternoon; add evening only
+when the supplied place type or attributes make that reasonable. Do not invent travel
+times, opening hours, distances, meals, or route optimization. Make clear that the order
+is a suggestion when route data is unavailable.
 When weather_assessment is present, include its forecast and suitability advice in the same
-answer. Connect weather to a place only when its supplied entity_type or category supports
+answer, format dates naturally as DD/MM/YYYY, then recommend suitable retrieved places.
+Connect weather to a place only when its supplied entity_type or category supports
 that conclusion. Do not invent whether a place is indoors, outdoors, open, or closed.
 Treat geographic relationships strictly: LOCATED_IN supports "nằm ở" or "thuộc";
 NEAR_AREA supports only "gần"; MENTIONS_GEO_AREA does not prove location and
@@ -35,6 +40,8 @@ by readable bullets for useful details such as address, cuisine, signature dishe
 opening hours, rating, price, amenities, and suitability. Integrate every FACT
 reference into a labelled sentence or bullet; never append bare FACT references.
 Keep the answer concise and useful. Do not mention internal retrieval, JSON, nodes, or scores.
+Start with the useful answer directly; do not say that you only have data or lack enough
+information when grounded places are available.
 """
 
 
@@ -56,34 +63,14 @@ class GeminiAnswerGenerator:
         http_options = types.HttpOptions(
             timeout=int(app_settings.gemini_timeout_seconds * 1000)
         )
-        if app_settings.google_genai_use_vertexai:
-            if not app_settings.google_cloud_project:
-                raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for Vertex AI")
-            client_credentials = None
-            if app_settings.google_application_credentials:
-                credentials_path = Path(app_settings.google_application_credentials)
-                if not credentials_path.exists():
-                    raise RuntimeError(f"Google credentials file does not exist: {credentials_path}")
-                from google.oauth2 import service_account
-
-                client_credentials = service_account.Credentials.from_service_account_file(
-                    credentials_path,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-            self._client = genai.Client(
-                vertexai=True,
-                project=app_settings.google_cloud_project,
-                location=app_settings.google_cloud_location,
-                credentials=client_credentials,
-                http_options=http_options,
+        if not app_settings.google_api_key:
+            raise RuntimeError(
+                "Gemini answer generation requires GOOGLE_API_KEY."
             )
-        elif app_settings.google_api_key:
-            self._client = genai.Client(
-                api_key=app_settings.google_api_key,
-                http_options=http_options,
-            )
-        else:
-            raise RuntimeError("Gemini answer generation is enabled but authentication is missing")
+        self._client = genai.Client(
+            api_key=app_settings.google_api_key,
+            http_options=http_options,
+        )
 
     def close(self) -> None:
         self._client.close()
