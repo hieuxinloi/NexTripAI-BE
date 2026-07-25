@@ -108,6 +108,40 @@ def test_orchestrator_plans_graph_only() -> None:
     assert plan.run_weather is False
 
 
+@pytest.mark.parametrize("message", ["hello", "Xin chào!", "Hi NexTrip"])
+def test_orchestrator_routes_greetings_without_graph_or_weather(message) -> None:
+    plan = build_orchestration_plan(
+        message=message,
+        travel_date=None,
+        include_weather=None,
+        entity_types=None,
+    )
+
+    assert plan.mode == OrchestrationMode.CONVERSATION
+    assert plan.run_graph is False
+    assert plan.run_weather is False
+    assert plan.reason == "greeting"
+
+
+def test_greeting_returns_helpful_answer_without_calling_graph() -> None:
+    result = TravelOrchestrator(FailingKbClient(), None).run(
+        message="hello",
+        session_id="greeting",
+        city=None,
+        entity_types=None,
+        top_k=5,
+        kb_version="v5",
+        travel_date=None,
+        include_weather=None,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert result.plan.mode == OrchestrationMode.CONVERSATION
+    assert "Quy Nhơn" in result.graph.answer
+    assert "Đà Nẵng" in result.graph.answer
+
+
 def test_orchestrator_weather_only_skips_graph() -> None:
     weather_client = FakeWeatherClient()
     result = TravelOrchestrator(FailingKbClient(), weather_client).run(
@@ -190,6 +224,45 @@ def test_synthesizer_receives_graph_and_weather_context() -> None:
     assert result.trace["generator"] == "llm_grounded_combined"
     assert result.trace["sources"] == ["graphrag", "weather"]
     assert generator.calls[0]["weather"]["suitability"] == "suitable"
+
+
+def test_synthesizer_marks_weather_forecast_tool_as_resolved() -> None:
+    generator = FakeSynthesizer()
+    graph = AgentResult(
+        answer="",
+        answer_type="recommendation",
+        evidence=[{
+            "place_id": "attr_dn_001",
+            "name": "Bảo tàng Đà Nẵng",
+            "city": "Đà Nẵng",
+            "entity_type": "attraction",
+        }],
+        required_tools=["weather_forecast"],
+    )
+    weather = WeatherAssessment(
+        location="Đà Nẵng",
+        forecast_date=date(2026, 7, 15),
+        condition="Mưa phùn nhẹ",
+        min_temperature_c=29,
+        max_temperature_c=35,
+        precipitation_probability=21,
+        suitability="caution",
+        advice="Nên ưu tiên không gian trong nhà.",
+    )
+
+    result = synthesize_answer(
+        question="Trời mưa thì nên đi đâu ở Đà Nẵng?",
+        kb_version="v5",
+        graph=graph,
+        graph_used=True,
+        weather=weather,
+        weather_requested=True,
+        weather_trace={"node": "weather", "status": "completed"},
+        answer_generator=generator,
+    )
+
+    assert result.unresolved_tools == []
+    assert result.trace["generator"] == "llm_grounded_combined"
 
 
 @pytest.mark.parametrize("generator", [None, FailingSynthesizer()])

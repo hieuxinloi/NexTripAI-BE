@@ -39,8 +39,27 @@ GRAPH_INTENT_TERMS = {
     "gan day",
 }
 
+GREETING_MESSAGES = {
+    "alo",
+    "chao",
+    "chao ban",
+    "hello",
+    "hello nextrip",
+    "hey",
+    "hi",
+    "hi nextrip",
+    "xin chao",
+    "xin chao nextrip",
+}
+
+GREETING_ANSWER = (
+    "Xin chào! Mình là NexTripAI. Bạn muốn khám phá Quy Nhơn hay Đà Nẵng? "
+    "Mình có thể gợi ý địa điểm, ăn uống, lưu trú hoặc lên lịch trình phù hợp."
+)
+
 
 class OrchestrationMode(str, Enum):
+    CONVERSATION = "conversation"
     GRAPH_ONLY = "graph_only"
     WEATHER_ONLY = "weather_only"
     GRAPH_AND_WEATHER = "graph_and_weather"
@@ -80,6 +99,13 @@ def build_orchestration_plan(
     include_weather: bool | None,
     entity_types: list[str] | None,
 ) -> OrchestrationPlan:
+    if _is_greeting(message):
+        return OrchestrationPlan(
+            mode=OrchestrationMode.CONVERSATION,
+            run_graph=False,
+            run_weather=False,
+            reason="greeting",
+        )
     run_weather = WeatherAgent.should_run(
         message=message,
         travel_date=travel_date,
@@ -179,7 +205,7 @@ class TravelOrchestrator:
                 top_k=top_k,
                 kb_version=kb_version,
             )
-        else:
+        elif plan.run_weather:
             graph = AgentResult(
                 answer="",
                 answer_type="weather",
@@ -194,11 +220,16 @@ class TravelOrchestrator:
                 longitude=longitude,
                 required_tools=["weather"],
             )
+        else:
+            graph = AgentResult(
+                answer=GREETING_ANSWER,
+                answer_type="conversation",
+            )
 
         if (
             plan.run_graph
             and not plan.run_weather
-            and "weather" in graph.required_tools
+            and bool({"weather", "weather_forecast"} & set(graph.required_tools))
         ):
             weather, weather_trace = self._run_weather(
                 message=message,
@@ -230,7 +261,6 @@ class TravelOrchestrator:
             weather_trace=weather_trace,
             trace=trace,
         )
-
     def _run_graph(
         self,
         *,
@@ -307,3 +337,8 @@ class TravelOrchestrator:
             "suitability": weather.suitability,
             "elapsed_ms": int((perf_counter() - started_at) * 1000),
         }
+
+
+def _is_greeting(message: str) -> bool:
+    normalized = " ".join(normalize_text(message).strip().strip("!.,?").split())
+    return normalized in GREETING_MESSAGES

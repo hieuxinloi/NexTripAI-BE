@@ -39,7 +39,11 @@ def synthesize_answer(
 ) -> SynthesisResult:
     unresolved_tools = list(graph.required_tools)
     if weather is not None:
-        unresolved_tools = [tool for tool in unresolved_tools if tool != "weather"]
+        unresolved_tools = [
+            tool
+            for tool in unresolved_tools
+            if tool not in {"weather", "weather_forecast"}
+        ]
     elif weather_requested and weather_trace.get("status") == "unavailable":
         if "weather" not in unresolved_tools:
             unresolved_tools.append("weather")
