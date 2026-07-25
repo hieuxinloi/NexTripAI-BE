@@ -7,8 +7,11 @@ from loguru import logger
 
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
-from src.core_ai.nextrip_agent.constants import TYPED_KB_VERSIONS
-from src.core_ai.nextrip_agent.conversation import resolve_conversation_context
+from src.core_ai.nextrip_agent.constants import is_typed_kb_version
+from src.core_ai.nextrip_agent.conversation import (
+    contextualize_message,
+    resolve_conversation_context,
+)
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
 from src.infra.kb_client import KbClient
@@ -26,7 +29,7 @@ class KnowledgeBaseUnavailableError(RuntimeError):
 def resolve_top_k(request: ChatRequest) -> int:
     if request.top_k is not None:
         return request.top_k
-    if request.kb_version in TYPED_KB_VERSIONS:
+    if is_typed_kb_version(request.kb_version):
         return TYPED_QUERY_RESULT_CEILING
     return DEFAULT_TOP_K
 
@@ -57,6 +60,7 @@ def handle_chat(
         history=history,
         explicit_travel_date=request.travel_date,
     )
+    graph_message = contextualize_message(request.message, context)
     _save_message(
         chat_store,
         request,
@@ -78,7 +82,7 @@ def handle_chat(
         len(request.message),
     )
     orchestration = TravelOrchestrator(kb_client, weather_client).run(
-        message=request.message,
+        message=graph_message,
         session_id=request.session_id,
         city=context.city,
         entity_types=request.entity_types,
@@ -149,6 +153,7 @@ def handle_chat(
         metadata={
             "kb_version": request.kb_version,
             "place_ids": [item.place_id for item in evidence],
+            "referenced_entities": _referenced_entities(evidence),
             "weather_suitability": weather.suitability if weather else None,
             "travel_date": (request.travel_date or context.travel_date).isoformat()
             if (request.travel_date or context.travel_date)
@@ -158,6 +163,18 @@ def handle_chat(
         },
     )
     return response
+
+
+def _referenced_entities(evidence: list[EvidenceItem]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": item.place_id,
+            "name": str(item.name),
+            "kind": item.entity_type or item.category or "place",
+        }
+        for item in evidence
+        if item.name
+    ][:20]
 
 
 def _save_message(

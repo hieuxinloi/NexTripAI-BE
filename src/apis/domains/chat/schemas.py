@@ -15,7 +15,7 @@ class ChatRequest(BaseModel):
     city: str | None = Field(default=None, max_length=80)
     entity_types: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
-    kb_version: KbVersion = "v3"
+    kb_version: KbVersion = Field(default="v3", pattern=r"^v[1-9][0-9]*$")
     travel_date: date | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
@@ -52,7 +52,7 @@ class ChatResponse(BaseModel):
     intent: str = "kb_retrieval"
     orchestration_mode: str = "graph_only"
     resolved_context: dict[str, Any] = Field(default_factory=dict)
-    kb_version: KbVersion = "v3"
+    kb_version: KbVersion = Field(default="v3", pattern=r"^v[1-9][0-9]*$")
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)

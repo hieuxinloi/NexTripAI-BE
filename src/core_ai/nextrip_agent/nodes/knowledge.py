@@ -9,7 +9,7 @@ from loguru import logger
 from src.core_ai.nextrip_agent.constants import (
     DEFAULT_TYPED_KB_VERSION,
     KbVersion,
-    TYPED_KB_VERSIONS,
+    is_typed_kb_version,
 )
 from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload, TypedTarget
 from src.core_ai.nextrip_agent.retrieval_plan import RetrievalRequest
@@ -117,7 +117,7 @@ def _execute_plan(
 
 
 def knowledge_node(state: NexTripAgentState, kb_client: SupportsKbSearch) -> NexTripAgentState:
-    if state.get("kb_version") in TYPED_KB_VERSIONS:
+    if is_typed_kb_version(state.get("kb_version")):
         return _knowledge_typed(state, kb_client)
     trace = list(state.get("trace") or [])
     evidence: list[dict] = []
@@ -293,7 +293,21 @@ def _typed_candidates(payload: TypedKbPayload) -> list[dict]:
         return payload.recommendations
     if payload.entities:
         return payload.entities
+    if payload.answer_type == "recommendation" and _has_named_concept_target(payload):
+        return []
     return _target_candidates(payload.targets)
+
+
+def _has_named_concept_target(payload: TypedKbPayload) -> bool:
+    targets = payload.query_plan.get("targets")
+    if not isinstance(targets, list):
+        return False
+    return any(
+        isinstance(target, dict)
+        and target.get("kind") in {"dish", "activity", "concept"}
+        and bool(target.get("value"))
+        for target in targets
+    )
 
 
 def _target_candidates(targets: list[TypedTarget]) -> list[dict]:

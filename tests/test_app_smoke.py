@@ -32,6 +32,18 @@ class AvailableTypedKbClient:
         }
 
 
+class VersionDiscoveryKbClient:
+    def readiness(self, *, force=False):
+        return {
+            "status": "ready",
+            "ready_versions": ["v3", "v5"],
+            "versions": {"v3": "ready", "v5": "ready"},
+        }
+
+    def ready_versions(self):
+        return {"v3", "v5"}
+
+
 def test_app_exposes_health() -> None:
     with TestClient(create_app()) as client:
         response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
@@ -39,6 +51,39 @@ def test_app_exposes_health() -> None:
     assert response.json()["status"] == "ok"
     assert response.json()["worker_pool"]["workers"] == 5
     assert response.headers["X-Request-ID"] == "test-request-id"
+
+
+def test_kb_versions_only_exposes_ready_versions() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = VersionDiscoveryKbClient()
+        response = client.get("/api/kb/versions")
+
+    assert response.status_code == 200
+    assert response.json()["versions"] == [
+        {"kb_version": "v5", "label": "V5"},
+        {"kb_version": "v3", "label": "V3"},
+    ]
+
+
+def test_explicit_unavailable_kb_version_is_not_silently_replaced() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = VersionDiscoveryKbClient()
+        app.state.settings.allow_client_kb_version = True
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe",
+                "session_id": "strict-version-session",
+                "kb_version": "v4",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Selected Knowledge Base V4 is not ready."
+    }
 
 
 def test_chat_returns_retryable_service_error_when_kb_is_down() -> None:

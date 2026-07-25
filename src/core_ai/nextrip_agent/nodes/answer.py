@@ -7,7 +7,7 @@ from src.core_ai.nextrip_agent.answer_generation import (
     fact_value_text,
     facts_for_answer,
 )
-from src.core_ai.nextrip_agent.constants import DEFAULT_TYPED_KB_VERSION, TYPED_KB_VERSIONS
+from src.core_ai.nextrip_agent.constants import DEFAULT_TYPED_KB_VERSION, is_typed_kb_version
 from src.core_ai.nextrip_agent.state import NexTripAgentState
 
 
@@ -61,10 +61,10 @@ def answer_node(
             + ". Cần bổ sung địa chỉ hoặc GeoArea đã xác minh."
         )
     elif missing_fields:
-        answer = f"Mình cần bạn bổ sung: {', '.join(missing_fields)}."
-    elif state.get("kb_version") in TYPED_KB_VERSIONS and facts:
+        answer = _clarification_answer(missing_fields)
+    elif is_typed_kb_version(state.get("kb_version")) and facts:
         answer = _format_typed_facts(evidence, facts, state.get("kb_version") or DEFAULT_TYPED_KB_VERSION)
-    elif state.get("kb_version") in TYPED_KB_VERSIONS and state.get("answer_type") == "entity_detail":
+    elif is_typed_kb_version(state.get("kb_version")) and state.get("answer_type") == "entity_detail":
         answer = f"Không tìm thấy địa điểm khớp đủ tin cậy trong Knowledge Base {str(state.get('kb_version')).upper()}."
     elif state.get("answer_type") == "unsupported":
         answer = "Câu hỏi này chưa được GraphRAG hiện tại hỗ trợ."
@@ -106,6 +106,32 @@ def answer_node(
         len(answer),
     )
     return {**state, "answer": answer, "trace": trace}
+
+
+def _clarification_answer(missing_fields: list[str]) -> str:
+    if "query_constraints" in missing_fields:
+        return (
+            "Bạn muốn tìm ở thành phố nào và ưu tiên loại địa điểm hoặc "
+            "trải nghiệm nào?"
+        )
+    unresolved_concepts = [
+        field.removeprefix("concept:")
+        for field in missing_fields
+        if field.startswith("concept:")
+    ]
+    if unresolved_concepts:
+        return (
+            "Mình chưa hiểu rõ tiêu chí “"
+            + ", ".join(unresolved_concepts)
+            + "”. Bạn có thể mô tả cụ thể hơn không?"
+        )
+    labels = {
+        "city": "thành phố",
+        "travel_date": "ngày dự kiến",
+        "entity_type": "loại địa điểm",
+    }
+    readable = [labels.get(field, field.replace("_", " ")) for field in missing_fields]
+    return f"Bạn vui lòng bổ sung {', '.join(readable)}."
 
 
 def _format_typed_facts(evidence: list[dict], facts: list[dict], kb_version: str) -> str:

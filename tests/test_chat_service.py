@@ -263,3 +263,20 @@ def test_unverified_geo_scope_is_reported_as_data_gap() -> None:
     )
 
     assert "chưa có địa điểm với quan hệ vị trí đủ tin cậy tại Tuy Phước" in state["answer"]
+
+
+def test_internal_query_constraint_is_rendered_as_natural_clarification() -> None:
+    state = answer_node(
+        {
+            "session_id": "clarification-v5",
+            "kb_version": "v5",
+            "answer_type": "entity_list",
+            "missing_fields": ["query_constraints"],
+            "facts": [],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert "query_constraints" not in state["answer"]
+    assert "thành phố" in state["answer"]

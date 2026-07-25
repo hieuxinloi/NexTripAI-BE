@@ -21,6 +21,7 @@ class ConversationContext:
     travel_date: date | None = None
     travel_date_source: str | None = None
     recent_place_ids: tuple[str, ...] = ()
+    recent_dishes: tuple[str, ...] = ()
 
     def trace_event(self) -> dict[str, Any]:
         return {
@@ -32,6 +33,7 @@ class ConversationContext:
             "travel_date": self.travel_date.isoformat() if self.travel_date else None,
             "travel_date_source": self.travel_date_source,
             "recent_place_ids": list(self.recent_place_ids),
+            "recent_dishes": list(self.recent_dishes),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +43,7 @@ class ConversationContext:
             "travel_date": self.travel_date.isoformat() if self.travel_date else None,
             "travel_date_source": self.travel_date_source,
             "recent_place_ids": list(self.recent_place_ids),
+            "recent_dishes": list(self.recent_dishes),
         }
 
 
@@ -51,32 +54,93 @@ def resolve_conversation_context(
     history: list[dict[str, Any]],
     explicit_travel_date: date | None = None,
 ) -> ConversationContext:
-    history_date, recent_place_ids = _history_state(history)
+    history_date, recent_place_ids, recent_dishes = _history_state(history)
     travel_date = explicit_travel_date or history_date
     travel_date_source = "request" if explicit_travel_date else ("session_metadata" if history_date else None)
-    city = _canonical_city(explicit_city)
-    if city:
-        return ConversationContext(city, "request", len(history), travel_date, travel_date_source, recent_place_ids)
-
     city = _city_in_text(message)
     if city:
-        return ConversationContext(city, "current_message", len(history), travel_date, travel_date_source, recent_place_ids)
+        return ConversationContext(
+            city,
+            "current_message",
+            len(history),
+            travel_date,
+            travel_date_source,
+            recent_place_ids,
+            recent_dishes,
+        )
+
+    city = _canonical_city(explicit_city)
+    if city:
+        return ConversationContext(
+            city,
+            "request",
+            len(history),
+            travel_date,
+            travel_date_source,
+            recent_place_ids,
+            recent_dishes,
+        )
 
     for item in reversed(history):
         city = _canonical_city(item.get("city"))
         if city:
-            return ConversationContext(city, "session_metadata", len(history), travel_date, travel_date_source, recent_place_ids)
+            return ConversationContext(
+                city,
+                "session_metadata",
+                len(history),
+                travel_date,
+                travel_date_source,
+                recent_place_ids,
+                recent_dishes,
+            )
         if item.get("role") == "user":
             city = _city_in_text(str(item.get("content") or ""))
             if city:
-                return ConversationContext(city, "conversation_history", len(history), travel_date, travel_date_source, recent_place_ids)
+                return ConversationContext(
+                    city,
+                    "conversation_history",
+                    len(history),
+                    travel_date,
+                    travel_date_source,
+                    recent_place_ids,
+                    recent_dishes,
+                )
 
-    return ConversationContext(None, None, len(history), travel_date, travel_date_source, recent_place_ids)
+    return ConversationContext(
+        None,
+        None,
+        len(history),
+        travel_date,
+        travel_date_source,
+        recent_place_ids,
+        recent_dishes,
+    )
 
 
-def _history_state(history: list[dict[str, Any]]) -> tuple[date | None, tuple[str, ...]]:
+def contextualize_message(message: str, context: ConversationContext) -> str:
+    """Resolve short food follow-ups without changing the stored user message."""
+    normalized = normalize_text(message)
+    dish_references = (
+        "cac mon nay",
+        "cac mon tren",
+        "nhung mon nay",
+        "nhung mon tren",
+    )
+    if not context.recent_dishes or not any(
+        reference in normalized for reference in dish_references
+    ):
+        return message
+    dishes = ", ".join(context.recent_dishes)
+    return f"{message}\nCác món được nhắc đến ở lượt trước: {dishes}."
+
+
+def _history_state(
+    history: list[dict[str, Any]],
+) -> tuple[date | None, tuple[str, ...], tuple[str, ...]]:
     travel_date = None
     place_ids: list[str] = []
+    dish_names: list[str] = []
+    found_entity_snapshot = False
     for item in reversed(history):
         metadata = item.get("metadata")
         if not isinstance(metadata, dict):
@@ -92,7 +156,15 @@ def _history_state(history: list[dict[str, Any]]) -> tuple[date | None, tuple[st
             value = str(place_id)
             if value not in place_ids:
                 place_ids.append(value)
-    return travel_date, tuple(place_ids[:20])
+        if not found_entity_snapshot and "referenced_entities" in metadata:
+            found_entity_snapshot = True
+            for entity in metadata.get("referenced_entities") or []:
+                if not isinstance(entity, dict) or entity.get("kind") != "dish":
+                    continue
+                name = str(entity.get("name") or "").strip()
+                if name and name not in dish_names:
+                    dish_names.append(name)
+    return travel_date, tuple(place_ids[:20]), tuple(dish_names[:10])
 
 
 def _canonical_city(value: object) -> str | None:

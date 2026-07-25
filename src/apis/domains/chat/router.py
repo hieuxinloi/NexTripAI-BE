@@ -83,16 +83,26 @@ def _prepare_request(
     limiter: InMemoryRateLimiter = http_request.app.state.rate_limiter
     client_host = http_request.client.host if http_request.client else "unknown"
     limiter.check(f"{principal.uid}:{client_host}")
-    version = _select_kb_version(request.kb_version, http_request)
+    version = _select_kb_version(
+        request.kb_version,
+        http_request,
+        client_selected="kb_version" in request.model_fields_set,
+    )
     return AuthenticatedChatRequest.model_validate(
         request.model_dump() | {"user_id": principal.uid, "kb_version": version}
     )
 
 
-def _select_kb_version(requested: str, http_request: Request) -> str:
+def _select_kb_version(
+    requested: str,
+    http_request: Request,
+    *,
+    client_selected: bool,
+) -> str:
     app_settings: Settings = http_request.app.state.settings
     kb_client: KbClient = http_request.app.state.kb_client
-    preferred = requested if app_settings.allow_client_kb_version else app_settings.active_kb_version
+    use_client_version = app_settings.allow_client_kb_version and client_selected
+    preferred = requested if use_client_version else app_settings.active_kb_version
     candidates = list(dict.fromkeys([
         preferred,
         app_settings.active_kb_version,
@@ -105,6 +115,13 @@ def _select_kb_version(requested: str, http_request: Request) -> str:
         if app_settings.environment == "production":
             raise HTTPException(status_code=503, detail="Knowledge Base is not ready.") from exc
         return preferred
+    if use_client_version:
+        if requested in ready_versions:
+            return requested
+        raise HTTPException(
+            status_code=503,
+            detail=f"Selected Knowledge Base {requested.upper()} is not ready.",
+        )
     for version in candidates:
         if version in ready_versions:
             return version

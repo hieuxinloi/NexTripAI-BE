@@ -12,9 +12,55 @@ from src.infra.kb_client import KbClient
 router = APIRouter(tags=["health"])
 
 
+def _version_sort_key(version: str) -> int:
+    try:
+        return int(version.removeprefix("v"))
+    except ValueError:
+        return 0
+
+
 @router.get("/live")
 async def live() -> dict[str, str]:
     return {"status": "ok", "service": "nextrip-be"}
+
+
+@router.get("/api/kb/versions")
+async def kb_versions(request: Request) -> dict[str, object]:
+    app_settings = request.app.state.settings
+    kb_client: KbClient = request.app.state.kb_client
+    try:
+        dependency = await to_thread.run_sync(
+            kb_client.readiness,
+            abandon_on_cancel=True,
+        )
+        ready_versions = sorted(
+            {str(item) for item in dependency.get("ready_versions") or []},
+            key=_version_sort_key,
+            reverse=True,
+        )
+    except Exception as exc:
+        return {
+            "status": "not_ready",
+            "default_version": None,
+            "versions": [],
+            "error": exc.__class__.__name__,
+        }
+    default_version = (
+        app_settings.active_kb_version
+        if app_settings.active_kb_version in ready_versions
+        else next(iter(ready_versions), None)
+    )
+    return {
+        "status": "ready" if ready_versions else "not_ready",
+        "default_version": default_version,
+        "versions": [
+            {
+                "kb_version": version,
+                "label": version.upper(),
+            }
+            for version in ready_versions
+        ],
+    }
 
 
 @router.get("/ready")
@@ -55,6 +101,12 @@ async def health(request: Request) -> dict[str, object]:
         "weather": "ready",
         "weather_provider": "open-meteo",
         "chat_store": request.app.state.chat_store.backend_name,
+        "answer_generation": (
+            "gemini_ai_studio"
+            if request.app.state.answer_generator is not None
+            else "template"
+        ),
+        "gemini_model": request.app.state.settings.gemini_model,
         "auth_mode": request.app.state.settings.auth_mode,
         "active_kb_version": request.app.state.settings.active_kb_version,
         "worker_pool": worker_pool.statistics(),
