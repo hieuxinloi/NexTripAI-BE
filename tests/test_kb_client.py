@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from src.infra.kb_client import KbClient
 
@@ -70,4 +71,26 @@ def test_kb_client_calls_v4_query_contract() -> None:
     kb_client.query_typed(query="seafood for families", top_k=5, kb_version="v4")
 
     assert '"kb_version":"v4"' in captured["body"]
+    client.close()
+
+
+def test_kb_client_does_not_retry_read_timeout() -> None:
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        raise httpx.ReadTimeout("KB response was too slow", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    kb_client = KbClient(
+        "http://kb.test",
+        client=client,
+        retry_attempts=3,
+    )
+
+    with pytest.raises(httpx.ReadTimeout):
+        kb_client.query_typed(query="slow query", top_k=5, kb_version="v5")
+
+    assert request_count == 1
     client.close()

@@ -172,7 +172,9 @@ class KbClient:
 
 
 def _is_retryable(exc: Exception) -> bool:
-    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+    if isinstance(exc, httpx.ReadTimeout):
+        return False
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
         return True
     return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
         408,
