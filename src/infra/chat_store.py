@@ -166,7 +166,6 @@ class InMemoryChatStore:
                 self._idempotency.pop(cache_key, None)
             return existed
 
-    def get_session_memory(
     def create_session(
         self,
         session_id: str,
