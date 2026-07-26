@@ -128,7 +128,9 @@ Minimum env:
 NEXTRIP_KB_BASE_URL=http://localhost:8010
 WEATHER_PROVIDER=mock
 GOOGLE_API_KEY=your-google-ai-studio-key
-GEMINI_MODEL=gemini-flash-latest
+GEMINI_CONTEXT_MODEL=gemini-3.5-flash-lite
+GEMINI_ANSWER_MODEL=gemini-3.6-flash
+GEMINI_THINKING_LEVEL=minimal
 ```
 
 Keep config local-first. Do not add Key Vault/Azure infra for this do an.

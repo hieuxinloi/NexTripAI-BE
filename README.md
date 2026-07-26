@@ -91,12 +91,17 @@ Implemented endpoints:
 - `DELETE /api/sessions/{session_id}`
 
 The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stores
-conversation messages in memory or Firestore. It never connects directly to Neo4j.
+conversation messages plus rolling memory in memory or Firestore. It never connects
+directly to Neo4j. Local Firestore authentication can use
+`FIRESTORE_CREDENTIALS_PATH`; deployed workloads should use an attached service account.
 
 Current chat orchestration:
 
 ```text
 Frontend -> POST /api/chat -> Conversation Context Resolver
+                            -> Gemini Contextualizer
+                               +-> conversation recall -> transcript answer
+                               +-> travel follow-up -> standalone request
                             -> TravelOrchestrator
                                +-> GraphRAG Agent -> KB API -> Neo4j evidence
                                +-> Weather Agent -> Open-Meteo assessment
@@ -110,7 +115,9 @@ tool without discarding successful evidence from the other branch.
 
 Agent production capabilities:
 
-- Multi-turn city context backed by the configured chat store.
+- Durable transcript, structured trip state, and rolling summary backed by the chat store.
+- Generic reference resolution and conversation recall without phrase-specific hard coding.
+- Fail-open contextualization: Gemini failures keep the original travel request usable.
 - Explicit tool routing, concurrent execution, timeout/error isolation, and clarification states.
 - Grounded synthesis with protected place/fact references and weather-aware recommendations.
 - Structured evidence, resolved context, missing fields, required tools, and node-level traces.
