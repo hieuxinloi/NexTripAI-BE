@@ -83,7 +83,7 @@ def _prepare_request(
     limiter: InMemoryRateLimiter = http_request.app.state.rate_limiter
     client_host = http_request.client.host if http_request.client else "unknown"
     limiter.check(f"{principal.uid}:{client_host}")
-    version = _select_kb_version(
+    version = select_kb_version(
         request.kb_version,
         http_request,
         client_selected="kb_version" in request.model_fields_set,
@@ -93,7 +93,7 @@ def _prepare_request(
     )
 
 
-def _select_kb_version(
+def select_kb_version(
     requested: str,
     http_request: Request,
     *,

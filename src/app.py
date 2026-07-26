@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.apis.domains.chat.idempotency import IdempotencyCoordinator
+from src.apis.domains.evaluations.manager import EvaluationManager
 from src.apis.routers import include_api_routers
 from src.config import settings
 from src.infra.kb_client import KbClient
@@ -17,6 +18,8 @@ from src.infra.llm import (
     create_answer_generator,
     create_conversation_contextualizer,
 )
+from src.infra.evaluation_judge import create_evaluation_judge
+from src.infra.evaluation_store import create_evaluation_store
 from src.shared.logging import configure_logging, install_request_logging
 from src.shared.telemetry import configure_telemetry
 from src.security.auth import Authenticator
@@ -37,6 +40,8 @@ async def lifespan(app: FastAPI):
     )
     answer_generator = create_answer_generator(app_settings)
     conversation_contextualizer = create_conversation_contextualizer(app_settings)
+    evaluation_judge = create_evaluation_judge(app_settings)
+    evaluation_store = create_evaluation_store(app_settings)
     weather_client = OpenMeteoWeatherClient(
         app_settings.weather_timeout_seconds,
         retry_attempts=app_settings.resilience_retry_attempts,
@@ -52,9 +57,19 @@ async def lifespan(app: FastAPI):
         chat_history_limit=app_settings.chat_history_limit,
         conversation_contextualizer=conversation_contextualizer,
     )
+    evaluation_manager = EvaluationManager(
+        worker_pool=chat_worker_pool,
+        kb_client=kb_client,
+        answer_generator=answer_generator,
+        chat_store=chat_store,
+        evaluation_store=evaluation_store,
+        judge=evaluation_judge,
+        chat_timeout_seconds=app_settings.chat_request_timeout_seconds,
+    )
     app.state.kb_client = kb_client
     app.state.answer_generator = answer_generator
     app.state.conversation_contextualizer = conversation_contextualizer
+    app.state.evaluation_manager = evaluation_manager
     app.state.weather_client = weather_client
     app.state.chat_store = chat_store
     app.state.settings = app_settings
@@ -69,6 +84,7 @@ async def lifespan(app: FastAPI):
             app.state.chat_worker_pool = chat_worker_pool
             yield
     finally:
+        await evaluation_manager.close()
         kb_client.close()
         if answer_generator is not None:
             answer_generator.close()

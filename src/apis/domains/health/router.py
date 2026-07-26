@@ -114,6 +114,11 @@ async def health(request: Request) -> dict[str, object]:
         "gemini_context_model": request.app.state.settings.gemini_context_model,
         "gemini_answer_model": request.app.state.settings.gemini_answer_model,
         "gemini_thinking_level": request.app.state.settings.gemini_thinking_level,
+        "evaluation": {
+            "available": request.app.state.evaluation_manager.available,
+            "judge_model": request.app.state.settings.gemini_context_model,
+            "persistence": request.app.state.evaluation_manager.persistence_backend,
+        },
         "auth_mode": request.app.state.settings.auth_mode,
         "active_kb_version": request.app.state.settings.active_kb_version,
         "worker_pool": worker_pool.statistics(),
