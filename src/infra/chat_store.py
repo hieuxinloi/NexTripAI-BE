@@ -33,6 +33,21 @@ class ChatStore(Protocol):
 
     def delete_session(self, session_id: str, *, user_id: str) -> bool: ...
 
+    def get_session_memory(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def save_session_memory(
+        self,
+        session_id: str,
+        memory: dict[str, Any],
+        *,
+        user_id: str | None = None,
+    ) -> None: ...
+
     def get_idempotent_response(
         self,
         session_id: str,
@@ -60,6 +75,7 @@ class InMemoryChatStore:
     def __init__(self) -> None:
         self._messages: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._session_users: dict[str, str] = {}
+        self._session_memory: dict[str, dict[str, Any]] = {}
         self._idempotency: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = Lock()
 
@@ -104,9 +120,31 @@ class InMemoryChatStore:
             existed = session_id in self._messages or session_id in self._session_users
             self._messages.pop(session_id, None)
             self._session_users.pop(session_id, None)
+            self._session_memory.pop(session_id, None)
             for cache_key in [key for key in self._idempotency if key[0] == session_id]:
                 self._idempotency.pop(cache_key, None)
             return existed
+
+    def get_session_memory(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            return dict(self._session_memory.get(session_id, {}))
+
+    def save_session_memory(
+        self,
+        session_id: str,
+        memory: dict[str, Any],
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._claim_or_check(session_id, user_id)
+            self._session_memory[session_id] = dict(memory)
 
     def get_idempotent_response(
         self,
@@ -138,7 +176,8 @@ class InMemoryChatStore:
             self._claim_or_check(session_id, user_id)
             self._idempotency[(session_id, key)] = {
                 "response": dict(response),
-                "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+                "expires_at": datetime.now(timezone.utc)
+                + timedelta(seconds=ttl_seconds),
             }
 
     def _claim_or_check(self, session_id: str, user_id: str | None) -> None:
@@ -169,9 +208,19 @@ class FirestoreChatStore:
                 "CHAT_STORE_BACKEND=firestore requires google-cloud-firestore."
             ) from exc
         self._firestore = firestore
+        credentials = None
+        project = app_settings.google_cloud_project
+        if app_settings.firestore_credentials_path:
+            from google.oauth2 import service_account
+
+            credentials = service_account.Credentials.from_service_account_file(
+                app_settings.firestore_credentials_path
+            )
+            project = project or credentials.project_id
         self._client = firestore.Client(
-            project=app_settings.google_cloud_project,
+            project=project,
             database=app_settings.firestore_database,
+            credentials=credentials,
         )
         self._sessions = self._client.collection(
             app_settings.firestore_sessions_collection
@@ -240,6 +289,39 @@ class FirestoreChatStore:
         session.delete()
         return True
 
+    def get_session_memory(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = self._sessions.document(session_id)
+        snapshot = session.get()
+        if not snapshot.exists:
+            return {}
+        data = snapshot.to_dict() or {}
+        self._check_owner(session_id, user_id, data)
+        memory = data.get("memory")
+        return dict(memory) if isinstance(memory, dict) else {}
+
+    def save_session_memory(
+        self,
+        session_id: str,
+        memory: dict[str, Any],
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        session = self._sessions.document(session_id)
+        self._check_owner(session_id, user_id)
+        session.set(
+            {
+                "user_id": user_id,
+                "memory": memory,
+                "updated_at": self._firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
     def get_idempotent_response(
         self,
         session_id: str,
@@ -271,11 +353,14 @@ class FirestoreChatStore:
     ) -> None:
         session = self._sessions.document(session_id)
         self._check_owner(session_id, user_id)
-        session.collection("idempotency").document(key).set({
-            "response": response,
-            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
-            "created_at": self._firestore.SERVER_TIMESTAMP,
-        })
+        session.collection("idempotency").document(key).set(
+            {
+                "response": response,
+                "expires_at": datetime.now(timezone.utc)
+                + timedelta(seconds=ttl_seconds),
+                "created_at": self._firestore.SERVER_TIMESTAMP,
+            }
+        )
 
     def _check_owner(
         self,

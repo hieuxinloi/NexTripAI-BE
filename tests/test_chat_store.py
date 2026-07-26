@@ -54,3 +54,17 @@ def test_memory_store_round_trips_idempotent_response() -> None:
         "request-key",
         user_id="user-a",
     ) == {"answer": "cached"}
+
+
+def test_memory_store_round_trips_session_memory() -> None:
+    store = InMemoryChatStore()
+    store.save_session_memory(
+        "session-1",
+        {"summary": "User prefers beaches."},
+        user_id="user-a",
+    )
+
+    assert store.get_session_memory(
+        "session-1",
+        user_id="user-a",
+    ) == {"summary": "User prefers beaches."}

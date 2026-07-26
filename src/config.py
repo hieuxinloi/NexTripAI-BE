@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     google_cloud_project: str | None = None
     weather_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     chat_store_backend: str = "memory"
+    firestore_credentials_path: str | None = None
     firestore_database: str = "(default)"
     firestore_sessions_collection: str = "chat_sessions"
     chat_history_limit: int = Field(default=8, ge=1, le=50)
