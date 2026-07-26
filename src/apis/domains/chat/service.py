@@ -13,8 +13,13 @@ from src.apis.domains.chat.schemas import (
     EvidenceItem,
 )
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
-from src.core_ai.nextrip_agent.constants import is_typed_kb_version
+from src.core_ai.nextrip_agent.constants import (
+    is_typed_kb_version,
+    supports_structured_conversation_context,
+)
 from src.core_ai.nextrip_agent.conversation import (
+    ConversationContext,
+    ResolvedTurn,
     SupportsConversationContextualization,
     answer_memory_context,
     SUPPORTED_CITIES,
@@ -149,7 +154,22 @@ def handle_chat(
         contextualizer=conversation_contextualizer,
         prior_summary=str(session_memory.get("summary") or "") or None,
     )
-    graph_message = resolved_turn.resolution.standalone_message
+    structured_context = supports_structured_conversation_context(
+        request.kb_version
+    )
+    stored_kb_context = session_memory.get("kb_context")
+    if not isinstance(stored_kb_context, dict):
+        stored_kb_context = None
+    if structured_context:
+        graph_message = request.message
+        kb_conversation_context = _kb_conversation_context(
+            session_memory=session_memory,
+            context=context,
+            resolved_turn=resolved_turn,
+        )
+    else:
+        graph_message = resolved_turn.resolution.standalone_message
+        kb_conversation_context = stored_kb_context
     _save_message(
         chat_store,
         request,
@@ -215,7 +235,11 @@ def handle_chat(
         )
         return response
 
-    orchestration = TravelOrchestrator(kb_client, weather_client).run(
+    orchestration = TravelOrchestrator(
+        kb_client,
+        weather_client,
+        planning_agent=answer_generator,
+    ).run(
         message=graph_message,
         session_id=request.session_id,
         city=context.city,
@@ -226,11 +250,7 @@ def handle_chat(
         include_weather=request.include_weather,
         latitude=request.latitude,
         longitude=request.longitude,
-        conversation_context=(
-            session_memory.get("kb_context")
-            if isinstance(session_memory.get("kb_context"), dict)
-            else None
-        ),
+        conversation_context=kb_conversation_context,
     )
     agent_result = orchestration.graph
     weather = orchestration.weather
@@ -258,6 +278,7 @@ def handle_chat(
         *orchestration.trace,
         *agent_result.trace,
         orchestration.weather_trace,
+        orchestration.planning_trace,
         synthesis.trace,
     ]
     logger.info(
@@ -295,6 +316,7 @@ def handle_chat(
             required_tools=synthesis.unresolved_tools,
         ),
         weather=weather,
+        weather_forecast=orchestration.weather_forecast,
     )
     _save_message(
         chat_store,
@@ -417,6 +439,25 @@ def _get_session_memory(
             exc.__class__.__name__,
         )
         return {}
+
+
+def _kb_conversation_context(
+    *,
+    session_memory: dict,
+    context: ConversationContext,
+    resolved_turn: ResolvedTurn,
+) -> dict | None:
+    stored = session_memory.get("kb_context")
+    payload = dict(stored) if isinstance(stored, dict) else {}
+    if context.city:
+        payload["cities"] = [context.city]
+        payload["city_source"] = context.city_source
+    if context.history_messages and not payload.get("turn_count"):
+        payload["turn_count"] = context.history_messages
+    standalone = resolved_turn.resolution.standalone_message.strip()
+    if standalone and standalone != resolved_turn.original_message.strip():
+        payload["resolved_query"] = standalone
+    return payload or None
 
 
 def _save_session_memory(

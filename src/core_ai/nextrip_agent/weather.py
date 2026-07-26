@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import math
 import re
 import unicodedata
 
@@ -55,6 +56,29 @@ def vietnam_today() -> date:
     return datetime.now(VIETNAM_TIMEZONE).date()
 
 
+def supported_city_from_coordinates(
+    latitude: float | None,
+    longitude: float | None,
+    *,
+    maximum_distance_km: float = 100,
+) -> str | None:
+    if latitude is None or longitude is None:
+        return None
+    nearest: tuple[float, str] | None = None
+    for name, city_latitude, city_longitude in CITY_COORDINATES.values():
+        distance = _haversine_km(
+            latitude,
+            longitude,
+            city_latitude,
+            city_longitude,
+        )
+        if nearest is None or distance < nearest[0]:
+            nearest = distance, name
+    if nearest is None or nearest[0] > maximum_distance_km:
+        return None
+    return nearest[1]
+
+
 class WeatherAgent:
     def __init__(self, client: OpenMeteoWeatherClient) -> None:
         self.client = client
@@ -85,6 +109,25 @@ class WeatherAgent:
         latitude: float | None,
         longitude: float | None,
     ) -> WeatherAssessment:
+        return self.run_range(
+            message=message,
+            city=city,
+            travel_date=travel_date,
+            latitude=latitude,
+            longitude=longitude,
+            duration_days=1,
+        )[0]
+
+    def run_range(
+        self,
+        *,
+        message: str,
+        city: str | None,
+        travel_date: date | None,
+        latitude: float | None,
+        longitude: float | None,
+        duration_days: int,
+    ) -> list[WeatherAssessment]:
         location = _city_location(city, message)
         if latitude is not None and longitude is not None:
             location_name = city or "Vị trí đã chọn"
@@ -95,25 +138,31 @@ class WeatherAgent:
                 "Cần city hoặc latitude/longitude để kiểm tra thời tiết."
             )
         target_date = travel_date or _target_date(message)
-        forecast = self.client.forecast(
+        forecasts = self.client.forecast_range(
             latitude,
             longitude,
             target_date,
+            duration_days,
             vietnam_today(),
         )
-        suitability, advice = assess_suitability(
-            precipitation=forecast.precipitation_probability,
-            thunderstorm=forecast.thunderstorm_probability,
-            uv_index=forecast.uv_index,
-            wind_gust=forecast.wind_gust_kph,
-            max_temperature=forecast.max_temperature_c,
-        )
-        return WeatherAssessment(
-            location=location_name,
-            **forecast.__dict__,
-            suitability=suitability,
-            advice=advice,
-        )
+        assessments: list[WeatherAssessment] = []
+        for forecast in forecasts:
+            suitability, advice = assess_suitability(
+                precipitation=forecast.precipitation_probability,
+                thunderstorm=forecast.thunderstorm_probability,
+                uv_index=forecast.uv_index,
+                wind_gust=forecast.wind_gust_kph,
+                max_temperature=forecast.max_temperature_c,
+            )
+            assessments.append(
+                WeatherAssessment(
+                    location=location_name,
+                    **forecast.__dict__,
+                    suitability=suitability,
+                    advice=advice,
+                )
+            )
+        return assessments
 
 
 def _city_location(city: str | None, message: str) -> tuple[str, float, float] | None:
@@ -135,6 +184,24 @@ def _target_date(message: str) -> date:
         except ValueError:
             pass
     return vietnam_today()
+
+
+def _haversine_km(
+    origin_latitude: float,
+    origin_longitude: float,
+    destination_latitude: float,
+    destination_longitude: float,
+) -> float:
+    radius_km = 6371.0088
+    lat1 = math.radians(origin_latitude)
+    lat2 = math.radians(destination_latitude)
+    delta_lat = lat2 - lat1
+    delta_lon = math.radians(destination_longitude - origin_longitude)
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    return radius_km * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
 def assess_suitability(

@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     answer_generation_mode: str = "template"
     gemini_context_model: str = Field(min_length=1)
     gemini_answer_model: str = Field(min_length=1)
+    gemini_planning_model: str = "gemini-3.6-flash"
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"]
+    gemini_planning_thinking_level: Literal["minimal", "low", "medium", "high"] = "medium"
     answer_temperature: float = 0.2
     gemini_timeout_seconds: float = Field(default=35.0, gt=0, le=60)
     gemini_input_cost_per_million_usd: float = Field(default=0.0, ge=0)

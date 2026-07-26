@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -138,6 +138,60 @@ class OpenMeteoWeatherClient:
         forecast = _daily_forecast(target_date, response.json().get("daily") or {})
         self._cache.set(cache_key, forecast, 10 * 60)
         return forecast
+
+    def forecast_range(
+        self,
+        latitude: float,
+        longitude: float,
+        start_date: date,
+        duration_days: int,
+        today: date,
+    ) -> list[DailyForecast]:
+        if duration_days < 1:
+            raise ValueError("duration_days must be positive")
+        dates = [start_date + timedelta(days=offset) for offset in range(duration_days)]
+        if (dates[0] - today).days < 0 or (dates[-1] - today).days > 15:
+            raise WeatherUnavailable(
+                "Open-Meteo forecast supports today through the next 15 days."
+            )
+        cache_keys = [
+            f"{latitude:.4f}:{longitude:.4f}:{target.isoformat()}"
+            for target in dates
+        ]
+        cached = [self._cache.get(key) for key in cache_keys]
+        if all(item is not None for item in cached):
+            return [item for item in cached if item is not None]
+
+        def operation() -> httpx.Response:
+            response = self.client.get(
+                WEATHER_ENDPOINT,
+                params={
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "daily": DAILY_VARIABLES,
+                    "timezone": "Asia/Ho_Chi_Minh",
+                    "start_date": dates[0].isoformat(),
+                    "end_date": dates[-1].isoformat(),
+                },
+            )
+            response.raise_for_status()
+            return response
+
+        try:
+            response = self._circuit.call(
+                lambda: retry(
+                    operation,
+                    attempts=self._retry_attempts,
+                    retryable=_is_retryable_weather_error,
+                )
+            )
+        except Exception as exc:
+            raise WeatherUnavailable("Open-Meteo weather request failed.") from exc
+        daily = response.json().get("daily") or {}
+        forecasts = [_daily_forecast(target, daily) for target in dates]
+        for key, forecast in zip(cache_keys, forecasts, strict=True):
+            self._cache.set(key, forecast, 10 * 60)
+        return forecasts
 
     def close(self) -> None:
         if self._owns_client:

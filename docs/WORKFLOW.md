@@ -245,9 +245,14 @@ Responsibilities:
 
 Responsibilities:
 
-- build day/time-slot itinerary from knowledge results.
-- consider weather, duration, budget and preferences.
-- output structured `plan`.
+- receive verified candidates from GraphRAG and a live Open-Meteo forecast range.
+- use Gemini structured output to select only supplied `place_id` values.
+- balance activities, meals, cafe/rest breaks and hotel check-in/check-out.
+- consider city, duration, current coordinates, opening hours and weather.
+- validate city scope, place IDs, role/type compatibility, time overlap and weather
+  suitability before exposing a structured itinerary.
+- fall back to a deterministic grounded schedule if Gemini planning is unavailable
+  or fails validation.
 
 ### `answer_agent_node`
 
@@ -278,7 +283,7 @@ flowchart LR
 Rules:
 
 - factual/recommendation: `intent -> knowledge -> answer`.
-- itinerary/weather-aware: `intent -> knowledge + weather -> planning -> answer`.
+- itinerary/weather-aware: `intent -> knowledge + weather range -> planning -> validation -> answer`.
 - missing info: `intent -> answer`.
 - KB failure: answer must say KB unavailable, no hallucination.
 - weather failure: planning can continue with a note.

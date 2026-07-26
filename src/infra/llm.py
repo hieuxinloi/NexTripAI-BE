@@ -9,6 +9,7 @@ from loguru import logger
 from src.config import Settings
 from src.core_ai.nextrip_agent.answer_generation import fact_value_text
 from src.core_ai.nextrip_agent.conversation import ConversationResolution
+from src.core_ai.nextrip_agent.planning import ItineraryPlan, ItineraryPlanDraft
 from src.shared.logging import safe_text
 from src.shared.telemetry import record_llm_usage, span
 
@@ -63,6 +64,20 @@ If a reference is genuinely ambiguous, keep the original wording instead of gues
 Write a compact Vietnamese rolling summary of durable user preferences, decisions,
 travel constraints, and the conversation's important outcomes. Do not include secrets,
 implementation details, or unsupported facts.
+"""
+
+PLANNING_SYSTEM_INSTRUCTION = """You are NexTripAI's grounded itinerary planning agent.
+Return only data matching the supplied schema. Select only place_id values that appear
+in candidates. Never invent a place, address, opening hour, travel time, or weather fact.
+Keep every stop inside the requested city and preserve the requested number of days.
+Create a comfortable route with 4-6 stops per full day when candidates permit:
+activities, lunch/dinner, a cafe or rest break, and hotel check-in/check-out when an
+overnight stay is requested. Do not treat a hotel as a sightseeing activity.
+Use opening hours when present. Avoid overlapping times. When weather is unsuitable,
+prefer candidates explicitly marked indoor and do not choose candidates explicitly
+marked outdoor-only. Use current coordinates and candidate coordinates to prefer a
+nearby first stop, but do not estimate exact travel times. Keep rationales concise and
+refer only to supplied candidate or weather attributes.
 """
 
 
@@ -177,7 +192,9 @@ class GeminiAnswerGenerator:
 
         self._types = types
         self._model = app_settings.gemini_answer_model
+        self._planning_model = app_settings.gemini_planning_model
         self._thinking_level = app_settings.gemini_thinking_level
+        self._planning_thinking_level = app_settings.gemini_planning_thinking_level
         self._temperature = app_settings.answer_temperature
         self._input_cost_per_million = app_settings.gemini_input_cost_per_million_usd
         self._output_cost_per_million = app_settings.gemini_output_cost_per_million_usd
@@ -237,6 +254,73 @@ class GeminiAnswerGenerator:
             itinerary=itinerary,
         )
 
+    def plan_itinerary(
+        self,
+        *,
+        question: str,
+        city: str,
+        duration_days: int,
+        duration_nights: int,
+        candidates: list[dict[str, Any]],
+        weather: list[dict[str, Any]],
+        latitude: float | None,
+        longitude: float | None,
+    ) -> ItineraryPlan:
+        prompt = {
+            "question": question,
+            "city": city,
+            "duration_days": duration_days,
+            "duration_nights": duration_nights,
+            "origin": (
+                {"latitude": latitude, "longitude": longitude}
+                if latitude is not None and longitude is not None
+                else None
+            ),
+            "weather": weather,
+            "candidates": [_planning_candidate(item) for item in candidates],
+        }
+        with span("gemini.plan_itinerary", model=self._planning_model):
+            response = self._client.models.generate_content(
+                model=self._planning_model,
+                contents=json.dumps(prompt, ensure_ascii=False, separators=(",", ":")),
+                config=self._types.GenerateContentConfig(
+                    system_instruction=PLANNING_SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=ItineraryPlanDraft,
+                    thinking_config=self._types.ThinkingConfig(
+                        thinking_level=self._planning_thinking_level,
+                    ),
+                ),
+            )
+        parsed = response.parsed
+        draft = (
+            cast(ItineraryPlanDraft, parsed)
+            if parsed is not None
+            else ItineraryPlanDraft.model_validate_json(response.text or "{}")
+        )
+        plan = ItineraryPlan.model_validate(draft.model_dump(mode="python"))
+        usage = response.usage_metadata
+        input_tokens = int(usage.prompt_token_count or 0) if usage else 0
+        output_tokens = int(usage.candidates_token_count or 0) if usage else 0
+        thinking_tokens = int(usage.thoughts_token_count or 0) if usage else 0
+        record_llm_usage(
+            self._planning_model,
+            input_tokens,
+            output_tokens,
+            thinking_tokens=thinking_tokens,
+            input_cost_per_million=self._input_cost_per_million,
+            output_cost_per_million=self._output_cost_per_million,
+        )
+        logger.info(
+            "Itinerary planned model={} days={} input_tokens={} output_tokens={} thinking_tokens={}",
+            self._planning_model,
+            len(plan.days),
+            input_tokens,
+            output_tokens,
+            thinking_tokens,
+        )
+        return plan
+
     def _generate(
         self,
         *,
@@ -249,6 +333,28 @@ class GeminiAnswerGenerator:
         conversation_context: dict[str, Any] | None,
         itinerary: list[dict[str, Any]] | None = None,
     ) -> str:
+        if itinerary:
+            selected_ids = {
+                str(slot.get("place_id"))
+                for day in itinerary
+                for slot in day.get("slots", [])
+                if slot.get("place_id")
+            }
+            evidence = [
+                item
+                for item in evidence
+                if str(item.get("place_id")) in selected_ids
+            ]
+            facts = [
+                item
+                for item in facts
+                if str(item.get("subject_id")) in selected_ids
+            ]
+            matched_paths = [
+                item
+                for item in matched_paths
+                if str(item.get("place_id")) in selected_ids
+            ]
         context, replacements = _protected_context(
             question=question,
             answer_type=answer_type,
@@ -404,6 +510,7 @@ def _protected_context(
                     "end_time": slot.get("end_time"),
                     "place": place_reference,
                     "entity_type": slot.get("entity_type"),
+                    "role": slot.get("role"),
                     "rationale": slot.get("rationale"),
                 }
             )
@@ -423,6 +530,40 @@ def _protected_context(
         },
         replacements,
     )
+
+
+def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    attributes = item.get("attributes") or {}
+    supported_attributes = {
+        key: attributes[key]
+        for key in (
+            "address",
+            "lat",
+            "lng",
+            "latitude",
+            "longitude",
+            "opening_hours_open",
+            "opening_hours_close",
+            "duration_recommendation",
+            "indoor",
+            "is_indoor",
+            "weather_suitable",
+            "price_per_person_min",
+            "price_per_person_max",
+            "rating",
+        )
+        if key in attributes
+    }
+    return {
+        "place_id": item.get("place_id"),
+        "name": item.get("name"),
+        "city": item.get("city"),
+        "entity_type": item.get("entity_type"),
+        "category": item.get("category"),
+        "score": item.get("score"),
+        "distance_km": item.get("distance_km"),
+        "attributes": supported_attributes,
+    }
 
 
 def _ensure_single_entity_reference(

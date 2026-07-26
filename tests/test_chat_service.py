@@ -3,6 +3,9 @@ from __future__ import annotations
 from src.apis.domains.chat.schemas import ChatRequest
 from src.apis.domains.chat.service import resolve_top_k
 from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
+from src.core_ai.nextrip_agent.constants import (
+    supports_structured_conversation_context,
+)
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
 
@@ -84,6 +87,7 @@ class FakeV8ItineraryClient(FakeKbClient):
     def __init__(self) -> None:
         super().__init__()
         self.context: dict | None = None
+        self.query: str | None = None
 
     def query_typed(
         self,
@@ -93,6 +97,7 @@ class FakeV8ItineraryClient(FakeKbClient):
         kb_version="v8",
         conversation_context=None,
     ):
+        self.query = query
         self.context = conversation_context
         return {
             "kb_version": "v8",
@@ -131,6 +136,13 @@ class FakeV8ItineraryClient(FakeKbClient):
             "missing_fields": [],
             "trace": [],
         }
+
+
+def test_structured_conversation_context_is_a_version_capability() -> None:
+    assert supports_structured_conversation_context("v7") is False
+    assert supports_structured_conversation_context("v8") is True
+    assert supports_structured_conversation_context("v9") is True
+    assert supports_structured_conversation_context("latest") is False
 
 
 def test_nextrip_agent_uses_kb_evidence() -> None:
@@ -273,6 +285,32 @@ def test_v8_itinerary_context_and_warnings_survive_the_agent_boundary() -> None:
     assert result.itinerary[0]["slots"][0]["place_id"] == "attr_qn_001"
     assert result.warnings == ["itinerary_preferences_relaxed"]
     assert result.conversation_context["turn_count"] == 2
+
+
+def test_v8_keeps_named_query_verbatim_instead_of_appending_context_city() -> None:
+    client = FakeV8ItineraryClient()
+
+    run_nextrip_agent(
+        message="Highlight Coffee o dau",
+        session_id="named-v8",
+        city="Quy Nhon",
+        entity_types=None,
+        top_k=5,
+        kb_client=client,
+        kb_version="v8",
+        conversation_context={
+            "turn_count": 1,
+            "cities": ["Quy Nhon"],
+            "city_source": "conversation_history",
+        },
+    )
+
+    assert client.query == "Highlight Coffee o dau"
+    assert client.context == {
+        "turn_count": 1,
+        "cities": ["Quy Nhon"],
+        "city_source": "conversation_history",
+    }
 
 
 def test_v2_answer_formats_count_breakdown() -> None:

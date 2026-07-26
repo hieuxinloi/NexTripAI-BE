@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 
@@ -62,3 +62,36 @@ def test_heavy_rain_is_unsuitable() -> None:
     )
 
     assert suitability == "unsuitable"
+
+
+def test_weather_agent_fetches_the_full_itinerary_date_range() -> None:
+    today = vietnam_today()
+    tomorrow = today + timedelta(days=1)
+    payload = {
+        "daily": {
+            "time": [today.isoformat(), tomorrow.isoformat()],
+            "weather_code": [2, 63],
+            "temperature_2m_min": [25, 24],
+            "temperature_2m_max": [31, 29],
+            "precipitation_probability_max": [20, 80],
+            "uv_index_max": [6, 2],
+            "wind_gusts_10m_max": [18, 25],
+        }
+    }
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=payload, request=request)
+    )
+    client = OpenMeteoWeatherClient(client=httpx.Client(transport=transport))
+
+    forecast = WeatherAgent(client).run_range(
+        message="Lịch trình Quy Nhơn 2 ngày",
+        city="Quy Nhơn",
+        travel_date=today,
+        latitude=None,
+        longitude=None,
+        duration_days=2,
+    )
+
+    assert [item.forecast_date for item in forecast] == [today, tomorrow]
+    assert forecast[0].suitability == "suitable"
+    assert forecast[1].suitability == "unsuitable"

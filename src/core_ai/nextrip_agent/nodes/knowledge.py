@@ -10,6 +10,7 @@ from src.core_ai.nextrip_agent.constants import (
     DEFAULT_TYPED_KB_VERSION,
     KbVersion,
     is_typed_kb_version,
+    supports_structured_conversation_context,
 )
 from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload, TypedTarget
 from src.core_ai.nextrip_agent.retrieval_plan import RetrievalRequest
@@ -60,6 +61,17 @@ def _query_with_city(query: str, city: str | None) -> str:
     ):
         return query
     return f"{query} o {city}"
+
+
+def _typed_query(
+    query: str,
+    city: str | None,
+    conversation_context: dict | None,
+) -> str:
+    """Keep input verbatim when the planner receives structured city provenance."""
+    if conversation_context and conversation_context.get("city_source"):
+        return query
+    return _query_with_city(query, city)
 
 
 def _run_search(
@@ -188,14 +200,18 @@ def _knowledge_typed(
     started_at = perf_counter()
     kb_version = state.get("kb_version") or DEFAULT_TYPED_KB_VERSION
     try:
-        query = _query_with_city(state["message"], state.get("city"))
+        conversation_context = state.get("conversation_context")
+        query = _typed_query(
+            state["message"],
+            state.get("city"),
+            conversation_context,
+        )
         request = {
             "query": query,
             "top_k": state["top_k"],
             "kb_version": kb_version,
         }
-        conversation_context = state.get("conversation_context")
-        if conversation_context:
+        if conversation_context and supports_structured_conversation_context(kb_version):
             request["conversation_context"] = conversation_context
         payload = TypedKbPayload.model_validate(kb_client.query_typed(**request))
         if payload.error:

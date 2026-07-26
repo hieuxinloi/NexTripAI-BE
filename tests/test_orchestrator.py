@@ -74,6 +74,12 @@ class FakeWeatherClient:
             wind_gust_kph=18,
         )
 
+    def forecast_range(self, latitude, longitude, start_date, duration_days, today):
+        return [
+            self.forecast(latitude, longitude, start_date, today)
+            for _ in range(duration_days)
+        ]
+
 
 class FakeSynthesizer:
     def __init__(self) -> None:
@@ -106,6 +112,20 @@ def test_orchestrator_plans_graph_only() -> None:
     assert plan.mode == OrchestrationMode.GRAPH_ONLY
     assert plan.run_graph is True
     assert plan.run_weather is False
+
+
+def test_orchestrator_routes_itinerary_through_graph_weather_and_planning() -> None:
+    plan = build_orchestration_plan(
+        message="Tôi ở Quy Nhơn 2 ngày 1 đêm, lộ trình thế nào?",
+        travel_date=None,
+        include_weather=None,
+        entity_types=None,
+    )
+
+    assert plan.mode == OrchestrationMode.ITINERARY_PLANNING
+    assert plan.run_graph is True
+    assert plan.run_weather is True
+    assert plan.run_planning is True
 
 
 @pytest.mark.parametrize("message", ["hello", "Xin chào!", "Hi NexTrip"])

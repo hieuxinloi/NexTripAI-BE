@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from src.apis.domains.chat.schemas import ChatRequest
-from src.apis.domains.chat.service import handle_chat
+from src.apis.domains.chat.service import _kb_conversation_context, handle_chat
 from src.core_ai.nextrip_agent.conversation import (
+    ConversationContext,
     ConversationResolution,
+    ResolvedTurn,
     resolve_conversation_context,
     resolve_turn,
 )
@@ -14,6 +16,35 @@ from src.infra.weather import DailyForecast
 class FailingKbClient:
     def query_typed(self, **kwargs):
         raise AssertionError("Weather-only follow-up must not call GraphRAG")
+
+
+def test_kb_context_preserves_city_provenance_and_resolved_reference() -> None:
+    context = ConversationContext(
+        city="Quy Nhon",
+        city_source="conversation_history",
+        history_messages=2,
+    )
+    resolved = ResolvedTurn(
+        resolution=ConversationResolution(
+            standalone_message="Tim Highlight Coffee o Quy Nhon",
+        ),
+        status="completed",
+        reason="model",
+        original_message="Highlight Coffee o dau",
+    )
+
+    payload = _kb_conversation_context(
+        session_memory={},
+        context=context,
+        resolved_turn=resolved,
+    )
+
+    assert payload == {
+        "cities": ["Quy Nhon"],
+        "city_source": "conversation_history",
+        "turn_count": 2,
+        "resolved_query": "Tim Highlight Coffee o Quy Nhon",
+    }
 
 
 class FakeWeatherClient:
@@ -31,6 +62,12 @@ class FakeWeatherClient:
             uv_index=6,
             wind_gust_kph=18,
         )
+
+    def forecast_range(self, latitude, longitude, start_date, duration_days, today):
+        return [
+            self.forecast(latitude, longitude, start_date, today)
+            for _ in range(duration_days)
+        ]
 
 
 class FoodConversationKbClient:

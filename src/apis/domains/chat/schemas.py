@@ -78,6 +78,7 @@ class ChatResponse(BaseModel):
     required_tools: list[str] = Field(default_factory=list)
     clarification: Clarification | None = None
     weather: WeatherAssessment | None = None
+    weather_forecast: list[WeatherAssessment] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):
