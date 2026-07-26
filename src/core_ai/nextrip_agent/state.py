@@ -25,3 +25,6 @@ class NexTripAgentState(TypedDict, total=False):
     matched_paths: list[dict[str, Any]]
     constraint_results: list[dict[str, Any]]
     required_tools: list[str]
+    itinerary: list[dict[str, Any]]
+    warnings: list[str]
+    conversation_context: dict[str, Any]

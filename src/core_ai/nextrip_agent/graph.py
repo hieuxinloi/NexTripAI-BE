@@ -23,6 +23,7 @@ def run_nextrip_agent(
     kb_client: SupportsKbSearch,
     kb_version: KbVersion = DEFAULT_KB_VERSION,
     answer_generator: SupportsAnswerGeneration | None = None,
+    conversation_context: dict | None = None,
 ) -> AgentResult:
     started_at = perf_counter()
     logger.info(
@@ -39,6 +40,7 @@ def run_nextrip_agent(
         "entity_types": entity_types,
         "top_k": top_k,
         "kb_version": kb_version,
+        "conversation_context": conversation_context or {},
         "trace": [],
     }
     state = intent_node(state)
@@ -56,6 +58,9 @@ def run_nextrip_agent(
         matched_paths=list(state.get("matched_paths") or []),
         constraint_results=list(state.get("constraint_results") or []),
         required_tools=list(state.get("required_tools") or []),
+        itinerary=list(state.get("itinerary") or []),
+        warnings=list(state.get("warnings") or []),
+        conversation_context=dict(state.get("conversation_context") or {}),
     )
     logger.info(
         "NexTrip agent end session_id={} evidence_count={} trace_events={} elapsed_ms={}",

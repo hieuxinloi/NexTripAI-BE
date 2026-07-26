@@ -162,6 +162,7 @@ class TravelOrchestrator:
         include_weather: bool | None,
         latitude: float | None,
         longitude: float | None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> OrchestratedResult:
         plan = build_orchestration_plan(
             message=message,
@@ -183,6 +184,7 @@ class TravelOrchestrator:
                     entity_types=entity_types,
                     top_k=top_k,
                     kb_version=kb_version,
+                    conversation_context=conversation_context,
                 )
                 weather_future = pool.submit(
                     self._run_weather,
@@ -204,6 +206,7 @@ class TravelOrchestrator:
                 entity_types=entity_types,
                 top_k=top_k,
                 kb_version=kb_version,
+                conversation_context=conversation_context,
             )
         elif plan.run_weather:
             graph = AgentResult(
@@ -270,6 +273,7 @@ class TravelOrchestrator:
         entity_types: list[str] | None,
         top_k: int,
         kb_version: KbVersion,
+        conversation_context: dict[str, Any] | None = None,
     ) -> AgentResult:
         return run_nextrip_agent(
             message=message,
@@ -280,6 +284,7 @@ class TravelOrchestrator:
             kb_client=self.kb_client,
             kb_version=kb_version,
             answer_generator=None,
+            conversation_context=conversation_context,
         )
 
     def _run_weather(

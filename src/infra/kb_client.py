@@ -77,10 +77,24 @@ class KbClient:
         }
         return self._post("/api/kb/answer", payload)
 
-    def query_typed(self, *, query: str, top_k: int, kb_version: str = "v2") -> dict[str, Any]:
+    def query_typed(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        kb_version: str = "v2",
+        conversation_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "query": query,
+            "kb_version": kb_version,
+            "top_k": top_k,
+        }
+        if conversation_context:
+            payload["conversation_context"] = conversation_context
         return self._post(
             "/api/kb/query",
-            {"query": query, "kb_version": kb_version, "top_k": top_k},
+            payload,
         )
 
     def readiness(self, *, force: bool = False) -> dict[str, Any]:

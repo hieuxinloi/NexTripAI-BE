@@ -61,4 +61,5 @@ class SupportsAnswerSynthesis(SupportsAnswerGeneration, Protocol):
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
         conversation_context: dict[str, Any] | None = None,
+        itinerary: list[dict[str, Any]] | None = None,
     ) -> str: ...

@@ -69,6 +69,7 @@ class ChatResponse(BaseModel):
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)
     itinerary: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
     query_plan: dict[str, Any] = Field(default_factory=dict)

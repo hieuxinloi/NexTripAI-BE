@@ -35,6 +35,7 @@ class SupportsKbSearch(Protocol):
         query: str,
         top_k: int,
         kb_version: KbVersion = DEFAULT_TYPED_KB_VERSION,
+        conversation_context: dict | None = None,
     ) -> dict:
         ...
 
@@ -188,13 +189,15 @@ def _knowledge_typed(
     kb_version = state.get("kb_version") or DEFAULT_TYPED_KB_VERSION
     try:
         query = _query_with_city(state["message"], state.get("city"))
-        payload = TypedKbPayload.model_validate(
-            kb_client.query_typed(
-                query=query,
-                top_k=state["top_k"],
-                kb_version=kb_version,
-            )
-        )
+        request = {
+            "query": query,
+            "top_k": state["top_k"],
+            "kb_version": kb_version,
+        }
+        conversation_context = state.get("conversation_context")
+        if conversation_context:
+            request["conversation_context"] = conversation_context
+        payload = TypedKbPayload.model_validate(kb_client.query_typed(**request))
         if payload.error:
             trace.extend(_knowledge_trace(payload.trace))
             return {
@@ -232,6 +235,9 @@ def _knowledge_typed(
             "matched_paths": payload.matched_paths,
             "constraint_results": payload.constraint_results,
             "required_tools": payload.required_tools,
+            "itinerary": payload.itinerary,
+            "warnings": payload.warnings,
+            "conversation_context": payload.conversation_context,
             "trace": trace,
         }
     except Exception as exc:
@@ -258,6 +264,9 @@ def _knowledge_typed(
             "matched_paths": [],
             "constraint_results": [],
             "required_tools": [],
+            "itinerary": [],
+            "warnings": [],
+            "conversation_context": {},
             "error": {
                 "code": "kb_unavailable",
                 "message": f"Knowledge Base {kb_version.upper()} is temporarily unavailable.",

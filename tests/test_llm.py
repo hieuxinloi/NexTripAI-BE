@@ -64,6 +64,34 @@ def test_grounded_context_masks_place_name_in_question() -> None:
     assert context["question"] == "[[PLACE_1]] địa chỉ ở đâu?"
 
 
+def test_grounded_context_uses_structured_itinerary_place_references() -> None:
+    context, replacements = _protected_context(
+        question="Lên lịch trình một ngày",
+        answer_type="recommendation",
+        evidence=[{
+            "place_id": "attr_qn_001",
+            "name": "Eo Gió",
+            "city": "Quy Nhơn",
+            "entity_type": "attraction",
+        }],
+        facts=[],
+        matched_paths=[],
+        itinerary=[{
+            "day": 1,
+            "slots": [{
+                "order": 1,
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "place_id": "attr_qn_001",
+                "entity_type": "attraction",
+            }],
+        }],
+    )
+
+    assert context["structured_itinerary"][0]["slots"][0]["place"] == "[[PLACE_1]]"
+    assert replacements["[[PLACE_1]]"] == "Eo Gió"
+
+
 def test_grounded_context_formats_list_fact_as_readable_text() -> None:
     _, replacements = _protected_context(
         question="Món đặc trưng là gì?",

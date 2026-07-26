@@ -151,6 +151,9 @@ def _clarification_answer(missing_fields: list[str]) -> str:
         "city": "thành phố",
         "travel_date": "ngày dự kiến",
         "entity_type": "loại địa điểm",
+        "geo_area": "khu vực",
+        "near_reference": "mốc dùng để tính khoảng cách",
+        "place": "tên địa điểm",
     }
     readable = [labels.get(field, field.replace("_", " ")) for field in missing_fields]
     return f"Bạn vui lòng bổ sung {', '.join(readable)}."

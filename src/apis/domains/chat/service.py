@@ -65,6 +65,40 @@ def _build_clarification(
             ]
             + [ClarificationOption(label="Cả hai thành phố", value="all")],
         )
+    if "near_reference" in missing_fields:
+        return Clarification(
+            field="near_reference",
+            prompt="Bạn muốn ưu tiên khoảng cách theo mốc nào?",
+            options=[
+                ClarificationOption(
+                    label="Gần trung tâm",
+                    value="Ưu tiên cách trung tâm thành phố không quá 3 km.",
+                ),
+                ClarificationOption(
+                    label="Gần biển",
+                    value="Ưu tiên cách biển không quá 2 km.",
+                ),
+                ClarificationOption(
+                    label="Không giới hạn",
+                    value="Bỏ tiêu chí khoảng cách và tìm trong toàn thành phố.",
+                ),
+            ],
+        )
+    if "geo_area" in missing_fields:
+        return Clarification(
+            field="geo_area",
+            prompt="Khu vực này chưa khớp chắc chắn. Bạn muốn mở rộng phạm vi chứ?",
+            options=[
+                ClarificationOption(
+                    label="Toàn thành phố",
+                    value="Bỏ giới hạn khu vực và tìm trong toàn thành phố.",
+                ),
+                ClarificationOption(
+                    label="Chỉ vị trí xác minh",
+                    value="Chỉ dùng địa điểm có quan hệ vị trí đã xác minh.",
+                ),
+            ],
+        )
     return None
 
 
@@ -166,10 +200,11 @@ def handle_chat(
                 "trace": trace,
             },
         )
-        _save_summary(
+        _save_session_memory(
             chat_store,
             request.session_id,
-            resolved_turn.resolution.summary,
+            existing=session_memory,
+            summary=resolved_turn.resolution.summary,
             user_id=user_id,
         )
         logger.info(
@@ -191,6 +226,11 @@ def handle_chat(
         include_weather=request.include_weather,
         latitude=request.latitude,
         longitude=request.longitude,
+        conversation_context=(
+            session_memory.get("kb_context")
+            if isinstance(session_memory.get("kb_context"), dict)
+            else None
+        ),
     )
     agent_result = orchestration.graph
     weather = orchestration.weather
@@ -242,6 +282,8 @@ def handle_chat(
         recommendations=evidence
         if agent_result.answer_type == "recommendation"
         else [],
+        itinerary=agent_result.itinerary,
+        warnings=agent_result.warnings,
         missing_fields=agent_result.missing_fields,
         trace=trace,
         query_plan=agent_result.query_plan,
@@ -269,14 +311,18 @@ def handle_chat(
             "travel_date": (request.travel_date or context.travel_date).isoformat()
             if (request.travel_date or context.travel_date)
             else None,
+            "itinerary": agent_result.itinerary,
+            "warnings": agent_result.warnings,
             "resolved_context": resolved_context,
             "trace": trace,
         },
     )
-    _save_summary(
+    _save_session_memory(
         chat_store,
         request.session_id,
-        resolved_turn.resolution.summary,
+        existing=session_memory,
+        summary=resolved_turn.resolution.summary,
+        kb_context=agent_result.conversation_context,
         user_id=user_id,
     )
     return response
@@ -373,19 +419,26 @@ def _get_session_memory(
         return {}
 
 
-def _save_summary(
+def _save_session_memory(
     chat_store: ChatStore | None,
     session_id: str,
-    summary: str | None,
     *,
+    existing: dict,
+    summary: str | None = None,
+    kb_context: dict | None = None,
     user_id: str | None = None,
 ) -> None:
-    if chat_store is None or not summary:
+    if chat_store is None or (not summary and not kb_context):
         return
+    memory = dict(existing)
+    if summary:
+        memory["summary"] = summary
+    if kb_context:
+        memory["kb_context"] = kb_context
     try:
         chat_store.save_session_memory(
             session_id,
-            {"summary": summary},
+            memory,
             user_id=user_id,
         )
     except Exception as exc:

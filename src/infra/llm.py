@@ -22,11 +22,9 @@ Never create a reference token. Use only reference tokens that exist verbatim in
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
 For recommendations, keep the retrieved order and explain only relationships present in matched_paths.
-When the user asks for an itinerary or a one-day plan, turn the retrieved order into
-a practical suggested sequence. Group it into morning and afternoon; add evening only
-when the supplied place type or attributes make that reasonable. Do not invent travel
-times, opening hours, distances, meals, or route optimization. Make clear that the order
-is a suggestion when route data is unavailable.
+When structured_itinerary is present, follow its days, slots, times, and place
+references exactly. Never reschedule, add, or remove a place. When it is absent,
+do not invent a timed itinerary; present retrieved places as candidates only.
 When weather_assessment is present, include its forecast and suitability advice in the same
 answer, format dates naturally as DD/MM/YYYY, then recommend suitable retrieved places.
 Connect weather to a place only when its supplied entity_type or category supports
@@ -143,10 +141,10 @@ class GeminiConversationContextualizer:
         )
         if resolution.summary:
             resolution.summary = resolution.summary[: self._summary_max_chars]
-        usage = getattr(response, "usage_metadata", None)
-        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+        usage = response.usage_metadata
+        input_tokens = int(usage.prompt_token_count or 0) if usage else 0
+        output_tokens = int(usage.candidates_token_count or 0) if usage else 0
+        thinking_tokens = int(usage.thoughts_token_count or 0) if usage else 0
         record_llm_usage(
             self._model,
             input_tokens,
@@ -226,6 +224,7 @@ class GeminiAnswerGenerator:
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
         conversation_context: dict[str, Any] | None = None,
+        itinerary: list[dict[str, Any]] | None = None,
     ) -> str:
         return self._generate(
             question=question,
@@ -235,6 +234,7 @@ class GeminiAnswerGenerator:
             matched_paths=matched_paths,
             weather=weather,
             conversation_context=conversation_context,
+            itinerary=itinerary,
         )
 
     def _generate(
@@ -247,6 +247,7 @@ class GeminiAnswerGenerator:
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
         conversation_context: dict[str, Any] | None,
+        itinerary: list[dict[str, Any]] | None = None,
     ) -> str:
         context, replacements = _protected_context(
             question=question,
@@ -256,6 +257,7 @@ class GeminiAnswerGenerator:
             matched_paths=matched_paths,
             weather=weather,
             conversation_context=conversation_context,
+            itinerary=itinerary,
         )
         with span("gemini.generate_answer", model=self._model, answer_type=answer_type):
             response = self._client.models.generate_content(
@@ -276,10 +278,10 @@ class GeminiAnswerGenerator:
             evidence=evidence,
         )
         grounded_answer = _restore_references(raw_answer, replacements)
-        usage = getattr(response, "usage_metadata", None)
-        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+        usage = response.usage_metadata
+        input_tokens = int(usage.prompt_token_count or 0) if usage else 0
+        output_tokens = int(usage.candidates_token_count or 0) if usage else 0
+        thinking_tokens = int(usage.thoughts_token_count or 0) if usage else 0
         record_llm_usage(
             self._model,
             input_tokens,
@@ -312,6 +314,7 @@ def _protected_context(
     matched_paths: list[dict[str, Any]],
     weather: dict[str, Any] | None = None,
     conversation_context: dict[str, Any] | None = None,
+    itinerary: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     replacements: dict[str, str] = {}
     place_references: dict[str, str] = {}
@@ -387,6 +390,26 @@ def _protected_context(
             }
         )
 
+    protected_itinerary = []
+    for day in itinerary or []:
+        slots = []
+        for slot in day.get("slots", []):
+            place_reference = place_references.get(str(slot.get("place_id") or ""))
+            if place_reference is None:
+                continue
+            slots.append(
+                {
+                    "order": slot.get("order"),
+                    "start_time": slot.get("start_time"),
+                    "end_time": slot.get("end_time"),
+                    "place": place_reference,
+                    "entity_type": slot.get("entity_type"),
+                    "rationale": slot.get("rationale"),
+                }
+            )
+        if slots:
+            protected_itinerary.append({"day": day.get("day"), "slots": slots})
+
     return (
         {
             "question": protected_question,
@@ -394,6 +417,7 @@ def _protected_context(
             "retrieved_places": protected_places,
             "verified_facts": protected_facts,
             "matched_graph_paths": protected_paths,
+            "structured_itinerary": protected_itinerary,
             "weather_assessment": weather,
             "conversation_memory": conversation_context,
         },

@@ -73,6 +73,7 @@ def synthesize_answer(
                     matched_paths=graph.matched_paths,
                     weather=weather.model_dump(mode="json") if weather else None,
                     conversation_context=conversation_context,
+                    itinerary=graph.itinerary,
                 )
                 return SynthesisResult(
                     answer=answer,

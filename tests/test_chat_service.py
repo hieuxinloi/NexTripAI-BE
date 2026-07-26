@@ -80,6 +80,59 @@ class FailingAnswerGenerator:
         raise RuntimeError("LLM unavailable")
 
 
+class FakeV8ItineraryClient(FakeKbClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context: dict | None = None
+
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        self.context = conversation_context
+        return {
+            "kb_version": "v8",
+            "answer_type": "recommendation",
+            "recommendations": [
+                {
+                    "place_id": "attr_qn_001",
+                    "name": "Eo Gió",
+                    "city": "Quy Nhơn",
+                    "entity_type": "attraction",
+                    "category": "Biển đảo",
+                }
+            ],
+            "itinerary": [
+                {
+                    "day": 1,
+                    "slots": [
+                        {
+                            "order": 1,
+                            "start_time": "09:00",
+                            "end_time": "10:30",
+                            "place_id": "attr_qn_001",
+                            "name": "Eo Gió",
+                            "city": "Quy Nhơn",
+                            "entity_type": "attraction",
+                            "rationale": "Điểm tham quan đã được grounding.",
+                        }
+                    ],
+                }
+            ],
+            "warnings": ["itinerary_preferences_relaxed"],
+            "conversation_context": {
+                "turn_count": 2,
+                "cities": ["Quy Nhơn"],
+            },
+            "missing_fields": [],
+            "trace": [],
+        }
+
+
 def test_nextrip_agent_uses_kb_evidence() -> None:
     fake_kb = FakeKbClient()
     result = run_nextrip_agent(
@@ -195,6 +248,31 @@ def test_answer_agent_falls_back_when_llm_fails() -> None:
     assert "Đà Nẵng 550000" in result.answer
     assert result.trace[-2]["status"] == "fallback"
     assert result.trace[-1]["generator"] == "template"
+
+
+def test_v8_itinerary_context_and_warnings_survive_the_agent_boundary() -> None:
+    client = FakeV8ItineraryClient()
+    result = run_nextrip_agent(
+        message="Lên lịch trình một ngày ở Quy Nhơn",
+        session_id="itinerary-v8",
+        city="Quy Nhơn",
+        entity_types=None,
+        top_k=5,
+        kb_client=client,
+        kb_version="v8",
+        conversation_context={
+            "turn_count": 1,
+            "cities": ["Quy Nhơn"],
+        },
+    )
+
+    assert client.context == {
+        "turn_count": 1,
+        "cities": ["Quy Nhơn"],
+    }
+    assert result.itinerary[0]["slots"][0]["place_id"] == "attr_qn_001"
+    assert result.warnings == ["itinerary_preferences_relaxed"]
+    assert result.conversation_context["turn_count"] == 2
 
 
 def test_v2_answer_formats_count_breakdown() -> None:

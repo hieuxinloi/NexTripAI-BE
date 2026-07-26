@@ -45,6 +45,9 @@ class TypedKbPayload(BaseModel):
     matched_paths: list[dict[str, Any]] = Field(default_factory=list)
     constraint_results: list[dict[str, Any]] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
+    itinerary: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    conversation_context: dict[str, Any] = Field(default_factory=dict)
     trace: list[dict[str, Any]] = Field(default_factory=list)
     error: TypedServiceError | None = None
 
@@ -61,3 +64,6 @@ class AgentResult(BaseModel):
     matched_paths: list[dict[str, Any]] = Field(default_factory=list)
     constraint_results: list[dict[str, Any]] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
+    itinerary: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    conversation_context: dict[str, Any] = Field(default_factory=dict)
