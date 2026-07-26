@@ -8,6 +8,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      GEMINI_CONTEXT_MODEL: gemini-3.5-flash-lite
+      GEMINI_ANSWER_MODEL: gemini-3.6-flash
+      GEMINI_THINKING_LEVEL: minimal
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
