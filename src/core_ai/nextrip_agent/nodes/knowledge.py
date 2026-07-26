@@ -14,6 +14,8 @@ from src.core_ai.nextrip_agent.constants import (
 from src.core_ai.nextrip_agent.schemas import KbSearchPayload, TypedKbPayload, TypedTarget
 from src.core_ai.nextrip_agent.retrieval_plan import RetrievalRequest
 from src.core_ai.nextrip_agent.state import NexTripAgentState
+from src.core_ai.nextrip_agent.weather import normalize_text
+from src.core_ai.nextrip_agent.conversation import SUPPORTED_CITIES
 
 
 class SupportsKbSearch(Protocol):
@@ -50,7 +52,11 @@ class SearchOutcome:
 def _query_with_city(query: str, city: str | None) -> str:
     if not city:
         return query
-    if city.lower() in query.lower():
+    normalized_query = normalize_text(query)
+    if normalize_text(city) in normalized_query or any(
+        normalized_name in normalized_query
+        for normalized_name in SUPPORTED_CITIES
+    ):
         return query
     return f"{query} o {city}"
 

@@ -11,6 +11,9 @@ class FailingKbClient:
 
 
 class AvailableTypedKbClient:
+    def ready_versions(self):
+        return {"v7"}
+
     def query_typed(self, *, query, top_k, kb_version):
         return {
             "kb_version": kb_version,
@@ -42,6 +45,11 @@ class VersionDiscoveryKbClient:
 
     def ready_versions(self):
         return {"v3", "v5"}
+
+
+class OnlyV7ReadyKbClient:
+    def ready_versions(self):
+        return {"v7"}
 
 
 def test_app_exposes_health() -> None:
@@ -82,7 +90,7 @@ def test_explicit_unavailable_kb_version_is_not_silently_replaced() -> None:
 
     assert response.status_code == 503
     assert response.json() == {
-        "detail": "Selected Knowledge Base V4 is not ready."
+        "detail": "No configured Knowledge Base version is ready: ['v4']"
     }
 
 
@@ -119,10 +127,30 @@ def test_stream_emits_structured_error_when_kb_is_down() -> None:
     assert f"Knowledge Base {expected_version} is temporarily unavailable." in response.text
 
 
+def test_explicit_unavailable_version_does_not_silently_fallback() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = OnlyV7ReadyKbClient()
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe",
+                "session_id": "explicit-version-session",
+                "kb_version": "v2",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "No configured Knowledge Base version is ready: ['v2']"
+    }
+
+
 def test_chat_does_not_render_graph_fallback_without_gemini() -> None:
     app = create_app()
     with TestClient(app) as client:
         app.state.kb_client = AvailableTypedKbClient()
+        app.state.settings.active_kb_version = "v7"
         app.state.answer_generator = None
         response = client.post(
             "/api/chat",

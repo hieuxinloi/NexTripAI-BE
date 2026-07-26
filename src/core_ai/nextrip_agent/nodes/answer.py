@@ -26,6 +26,21 @@ def _format_evidence_line(index: int, item: dict) -> str:
     return f"{index}. {name} - {category}, {city}."
 
 
+def _display_missing_fields(fields: list[str]) -> list[str]:
+    labels: list[str] = []
+    for field in fields:
+        if field == "query_constraints":
+            labels.append("tiêu chí hoặc điều kiện ưu tiên")
+        elif field.startswith("distance_between:"):
+            _, origin, destination = field.split(":", 2)
+            labels.append(f"khoảng cách giữa {origin} và {destination}")
+        elif field == "city":
+            labels.append("thành phố hoặc khu vực")
+        else:
+            labels.append(field)
+    return labels
+
+
 def answer_node(
     state: NexTripAgentState,
     answer_generator: SupportsAnswerGeneration | None = None,

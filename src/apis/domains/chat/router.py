@@ -102,12 +102,14 @@ def select_kb_version(
     app_settings: Settings = http_request.app.state.settings
     kb_client: KbClient = http_request.app.state.kb_client
     use_client_version = app_settings.allow_client_kb_version and client_selected
-    preferred = requested if use_client_version else app_settings.active_kb_version
-    candidates = list(dict.fromkeys([
-        preferred,
-        app_settings.active_kb_version,
-        *app_settings.kb_fallback_version_list,
-    ]))
+    if use_client_version:
+        candidates = [requested]
+    else:
+        candidates = list(dict.fromkeys([
+            app_settings.active_kb_version,
+            *app_settings.kb_fallback_version_list,
+        ]))
+    preferred = candidates[0]
     try:
         ready_versions = kb_client.ready_versions()
     except Exception as exc:
@@ -115,13 +117,6 @@ def select_kb_version(
         if app_settings.environment == "production":
             raise HTTPException(status_code=503, detail="Knowledge Base is not ready.") from exc
         return preferred
-    if use_client_version:
-        if requested in ready_versions:
-            return requested
-        raise HTTPException(
-            status_code=503,
-            detail=f"Selected Knowledge Base {requested.upper()} is not ready.",
-        )
     for version in candidates:
         if version in ready_versions:
             return version
