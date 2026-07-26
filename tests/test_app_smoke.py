@@ -181,3 +181,17 @@ def test_session_history_and_delete_are_scoped_to_authenticated_user() -> None:
     assert history.json()["messages"][0]["content"] == "Xin chao"
     assert deleted.json()["deleted"] is True
     assert empty.json()["messages"] == []
+
+
+def test_session_can_be_renamed() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        created = client.post("/api/sessions", json={"title": "Tên cũ"})
+        session_id = created.json()["session_id"]
+        renamed = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"title": "  Lịch trình Quy Nhơn  "},
+        )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Lịch trình Quy Nhơn"

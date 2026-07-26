@@ -31,6 +31,29 @@ class ChatStore(Protocol):
         user_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def create_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]: ...
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None: ...
+
     def delete_session(self, session_id: str, *, user_id: str) -> bool: ...
 
     def get_session_memory(
@@ -76,6 +99,7 @@ class InMemoryChatStore:
         self._messages: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._session_users: dict[str, str] = {}
         self._session_memory: dict[str, dict[str, Any]] = {}
+        self._sessions: dict[str, dict[str, Any]] = {}
         self._idempotency: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = Lock()
 
@@ -101,6 +125,22 @@ class InMemoryChatStore:
         }
         with self._lock:
             self._claim_or_check(session_id, user_id)
+            now = datetime.now(timezone.utc)
+            session = self._sessions.setdefault(
+                session_id,
+                {
+                    "session_id": session_id,
+                    "title": "Cuộc trò chuyện mới",
+                    "created_at": now,
+                    "updated_at": now,
+                    "message_count": 0,
+                    "user_id": user_id,
+                },
+            )
+            if role == "user" and session["message_count"] == 0:
+                session["title"] = content.strip().replace("\n", " ")[:120] or session["title"]
+            session["updated_at"] = now
+            session["message_count"] += 1
             self._messages[session_id].append(item)
 
     def recent_messages(
@@ -121,9 +161,65 @@ class InMemoryChatStore:
             self._messages.pop(session_id, None)
             self._session_users.pop(session_id, None)
             self._session_memory.pop(session_id, None)
+            self._sessions.pop(session_id, None)
             for cache_key in [key for key in self._idempotency if key[0] == session_id]:
                 self._idempotency.pop(cache_key, None)
             return existed
+
+    def get_session_memory(
+    def create_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            now = datetime.now(timezone.utc)
+            session = self._sessions.setdefault(
+                session_id,
+                {
+                    "session_id": session_id,
+                    "title": title or "Cuộc trò chuyện mới",
+                    "created_at": now,
+                    "updated_at": now,
+                    "message_count": len(self._messages.get(session_id, [])),
+                    "user_id": user_id,
+                },
+            )
+            return dict(session)
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [
+                dict(item)
+                for item in self._sessions.values()
+                if user_id is None or item.get("user_id") in {None, user_id}
+            ]
+        rows.sort(key=lambda item: item.get("updated_at") or datetime.min, reverse=True)
+        return rows[:limit]
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            session["title"] = title
+            session["updated_at"] = datetime.now(timezone.utc)
+            return dict(session)
 
     def get_session_memory(
         self,
@@ -239,10 +335,16 @@ class FirestoreChatStore:
     ) -> None:
         session = self._sessions.document(session_id)
         self._check_owner(session_id, user_id)
+        session_snapshot = session.get()
+        existing = session_snapshot.to_dict() if session_snapshot.exists else {}
         session.set(
             {
                 "user_id": user_id,
                 "city": city,
+                "title": (
+                    existing.get("title")
+                    or (content.strip().replace("\n", " ")[:120] if role == "user" else "Cuộc trò chuyện mới")
+                ),
                 "updated_at": self._firestore.SERVER_TIMESTAMP,
             },
             merge=True,
@@ -256,6 +358,50 @@ class FirestoreChatStore:
                 "created_at": self._firestore.SERVER_TIMESTAMP,
             }
         )
+
+    def create_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        session = self._sessions.document(session_id)
+        self._check_owner(session_id, user_id)
+        snapshot = session.get()
+        if not snapshot.exists:
+            session.set(
+                {
+                    "user_id": user_id,
+                    "title": title or "Cuộc trò chuyện mới",
+                    "created_at": self._firestore.SERVER_TIMESTAMP,
+                    "updated_at": self._firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+        return {"session_id": session_id, "title": title or "Cuộc trò chuyện mới", "message_count": 0}
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = self._sessions.order_by("updated_at", direction=self._firestore.Query.DESCENDING).limit(limit)
+        rows: list[dict[str, Any]] = []
+        for document in query.stream():
+            item = document.to_dict() or {}
+            if user_id is not None and item.get("user_id") not in {None, user_id}:
+                continue
+            message_count = len(list(document.reference.collection("messages").limit(200).stream()))
+            rows.append({
+                "session_id": document.id,
+                "title": item.get("title") or "Cuộc trò chuyện mới",
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+                "message_count": message_count,
+            })
+        return rows
 
     def recent_messages(
         self,
@@ -277,6 +423,36 @@ class FirestoreChatStore:
         ]
         rows.reverse()
         return rows
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        session = self._sessions.document(session_id)
+        snapshot = session.get()
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict() or {}
+        self._check_owner(session_id, user_id, data)
+        session.set(
+            {
+                "title": title,
+                "updated_at": self._firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return {
+            "session_id": session_id,
+            "title": title,
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+            "message_count": len(
+                list(session.collection("messages").limit(200).stream())
+            ),
+        }
 
     def delete_session(self, session_id: str, *, user_id: str) -> bool:
         session = self._sessions.document(session_id)

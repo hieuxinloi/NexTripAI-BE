@@ -189,6 +189,13 @@ def test_weather_without_location_returns_clarification() -> None:
     assert response.weather is None
     assert response.missing_fields == ["city"]
     assert response.answer == "Bạn muốn xem thời tiết ở Quy Nhơn hay Đà Nẵng?"
+    assert response.clarification is not None
+    assert response.clarification.field == "city"
+    assert [option.value for option in response.clarification.options] == [
+        "Đà Nẵng",
+        "Quy Nhơn",
+        "all",
+    ]
     assert any(event.get("status") == "needs_input" for event in response.trace)
 
 

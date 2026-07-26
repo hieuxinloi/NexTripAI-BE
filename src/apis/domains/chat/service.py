@@ -5,12 +5,19 @@ from uuid import uuid4
 
 from loguru import logger
 
-from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceItem
+from src.apis.domains.chat.schemas import (
+    ChatRequest,
+    ChatResponse,
+    Clarification,
+    ClarificationOption,
+    EvidenceItem,
+)
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.constants import is_typed_kb_version
 from src.core_ai.nextrip_agent.conversation import (
     SupportsConversationContextualization,
     answer_memory_context,
+    SUPPORTED_CITIES,
     resolve_conversation_context,
     resolve_turn,
 )
@@ -26,6 +33,39 @@ TYPED_QUERY_RESULT_CEILING = 20
 
 class KnowledgeBaseUnavailableError(RuntimeError):
     pass
+
+
+def _build_clarification(
+    missing_fields: list[str],
+    *,
+    required_tools: list[str],
+) -> Clarification | None:
+    if "city" in missing_fields:
+        weather_prompt = bool({"weather", "weather_forecast"} & set(required_tools))
+        return Clarification(
+            field="city",
+            prompt=(
+                "Bạn muốn xem thời tiết ở thành phố nào?"
+                if weather_prompt
+                else "Bạn muốn tìm ở thành phố nào?"
+            ),
+            options=[
+                ClarificationOption(label=city, value=city)
+                for city in SUPPORTED_CITIES.values()
+            ]
+            + [ClarificationOption(label="Cả hai thành phố", value="all")],
+        )
+    if "query_constraints" in missing_fields:
+        return Clarification(
+            field="query_constraints",
+            prompt="Bạn muốn ưu tiên thành phố nào, hay tìm trên cả hai?",
+            options=[
+                ClarificationOption(label=city, value=city)
+                for city in SUPPORTED_CITIES.values()
+            ]
+            + [ClarificationOption(label="Cả hai thành phố", value="all")],
+        )
+    return None
 
 
 def resolve_top_k(request: ChatRequest) -> int:
@@ -208,6 +248,10 @@ def handle_chat(
         matched_paths=agent_result.matched_paths,
         constraint_results=agent_result.constraint_results,
         required_tools=synthesis.unresolved_tools,
+        clarification=_build_clarification(
+            agent_result.missing_fields,
+            required_tools=synthesis.unresolved_tools,
+        ),
         weather=weather,
     )
     _save_message(

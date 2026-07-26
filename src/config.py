@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     firebase_project_id: str | None = None
     kb_auth_mode: Literal["none", "google_oidc"] = "none"
     kb_auth_audience: str | None = None
-    active_kb_version: str = Field(default="v3", pattern=r"^v[1-9][0-9]*$")
+    active_kb_version: str = Field(default="v8", pattern=r"^v[1-9][0-9]*$")
     kb_fallback_versions: str = ""
     allow_client_kb_version: bool = True
     kb_request_timeout_seconds: float = Field(default=25.0, gt=0, le=60)

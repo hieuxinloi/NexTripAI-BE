@@ -96,3 +96,29 @@ def test_memory_store_round_trips_session_memory() -> None:
         "session-1",
         user_id="user-a",
     ) == {"summary": "User prefers beaches."}
+
+def test_memory_store_lists_sessions_without_deleting_previous_chat() -> None:
+    store = InMemoryChatStore()
+    store.create_session("older", user_id="user-a", title="Cà phê Quy Nhơn")
+    store.save_message("newer", "m1", "user", "Nhà hàng ở Đà Nẵng", user_id="user-a")
+
+    sessions = store.list_sessions(user_id="user-a")
+
+    assert [item["session_id"] for item in sessions] == ["newer", "older"]
+    assert sessions[0]["title"] == "Nhà hàng ở Đà Nẵng"
+    assert sessions[0]["message_count"] == 1
+
+
+def test_memory_store_renames_owned_session() -> None:
+    store = InMemoryChatStore()
+    store.create_session("session-1", user_id="user-a", title="Tên cũ")
+
+    renamed = store.rename_session(
+        "session-1",
+        "Lịch trình Quy Nhơn",
+        user_id="user-a",
+    )
+
+    assert renamed is not None
+    assert renamed["title"] == "Lịch trình Quy Nhơn"
+    assert store.list_sessions(user_id="user-a")[0]["title"] == "Lịch trình Quy Nhơn"
