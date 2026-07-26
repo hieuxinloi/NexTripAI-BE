@@ -87,6 +87,10 @@ Implemented endpoints:
 - `GET /health`
 - `POST /api/chat`
 - `POST /api/chat/stream` (SSE events: `accepted`, `heartbeat`, `result`, `error`)
+- `POST /api/evaluations` (upload `.xlsx` and start an asynchronous evaluation)
+- `GET /api/evaluations` (list saved evaluation runs for the current user)
+- `GET /api/evaluations/{job_id}`
+- `DELETE /api/evaluations/{job_id}`
 - `GET /api/sessions/{session_id}/messages`
 - `DELETE /api/sessions/{session_id}`
 
@@ -94,6 +98,14 @@ The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stor
 conversation messages plus rolling memory in memory or Firestore. It never connects
 directly to Neo4j. Local Firestore authentication can use
 `FIRESTORE_CREDENTIALS_PATH`; deployed workloads should use an attached service account.
+
+The evaluation endpoint accepts a workbook with the columns `Câu hỏi của người dùng`
+and `Kết quả mong đợi` (maximum 5 MB and 500 cases). Every row runs through the real
+chat pipeline in an isolated session, then the configured context model acts as a
+deterministic semantic judge. Jobs run asynchronously, expose progress through polling,
+and use an 80% pass threshold. When `CHAT_STORE_BACKEND=firestore`, evaluation metadata
+and each case result are persisted in Firestore so completed runs can be reopened after
+an application restart. Memory mode keeps the same API contract for local demos.
 
 Current chat orchestration:
 
