@@ -35,10 +35,10 @@ def answer_node(
     facts = list(state.get("facts") or [])
     missing_fields = list(state.get("missing_fields") or [])
     required_tools = list(state.get("required_tools") or [])
-    not_found_entities = [
-        field.removeprefix("not_found:entity:")
+    not_found_targets = [
+        value
         for field in missing_fields
-        if field.startswith("not_found:entity:")
+        if (value := _not_found_value(field)) is not None
     ]
     unverified_geo_scopes = [
         field.removeprefix("verified_geo_candidates:")
@@ -47,10 +47,10 @@ def answer_node(
     ]
     if required_tools:
         answer = "Câu hỏi này cần dữ liệu động từ: " + ", ".join(required_tools) + "."
-    elif not_found_entities:
+    elif not_found_targets:
         answer = (
             "Mình chưa tìm thấy "
-            + ", ".join(not_found_entities)
+            + ", ".join(not_found_targets)
             + f" trong Knowledge Base {str(state.get('kb_version') or '').upper()}."
         )
     elif unverified_geo_scopes:
@@ -106,6 +106,13 @@ def answer_node(
         len(answer),
     )
     return {**state, "answer": answer, "trace": trace}
+
+
+def _not_found_value(field: str) -> str | None:
+    parts = field.split(":", 2)
+    if len(parts) != 3 or parts[0] != "not_found":
+        return None
+    return parts[2].strip() or None
 
 
 def _clarification_answer(missing_fields: list[str]) -> str:

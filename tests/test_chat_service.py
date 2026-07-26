@@ -249,6 +249,25 @@ def test_missing_v4_entity_is_reported_as_absent_data() -> None:
     assert state["answer"] == "Mình chưa tìm thấy FLC trong Knowledge Base V4."
 
 
+def test_missing_v5_place_is_reported_without_internal_error_code() -> None:
+    state = answer_node(
+        {
+            "session_id": "missing-place-v5",
+            "kb_version": "v5",
+            "answer_type": "entity_detail",
+            "missing_fields": ["not_found:place:Khách sạn Hilton Da Nang"],
+            "facts": [],
+            "evidence": [],
+            "trace": [],
+        }
+    )
+
+    assert state["answer"] == (
+        "Mình chưa tìm thấy Khách sạn Hilton Da Nang trong Knowledge Base V5."
+    )
+    assert "not_found" not in state["answer"]
+
+
 def test_unverified_geo_scope_is_reported_as_data_gap() -> None:
     state = answer_node(
         {
