@@ -24,13 +24,18 @@ class Settings(BaseSettings):
     ai_worker_count: int = Field(default=5, ge=1, le=32)
     ai_queue_capacity: int = Field(default=100, ge=1, le=10_000)
     answer_generation_mode: str = "template"
-    gemini_model: str = "gemini-flash-latest"
+    gemini_context_model: str = Field(min_length=1)
+    gemini_answer_model: str = Field(min_length=1)
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high"]
     answer_temperature: float = 0.2
     gemini_timeout_seconds: float = Field(default=35.0, gt=0, le=60)
     gemini_input_cost_per_million_usd: float = Field(default=0.0, ge=0)
     gemini_output_cost_per_million_usd: float = Field(default=0.0, ge=0)
     google_api_key: str | None = None
     google_cloud_project: str | None = None
+    conversation_context_enabled: bool = True
+    conversation_context_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    conversation_summary_max_chars: int = Field(default=1200, ge=200, le=4000)
     weather_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     chat_store_backend: str = "memory"
     firestore_credentials_path: str | None = None
@@ -42,7 +47,7 @@ class Settings(BaseSettings):
     kb_auth_mode: Literal["none", "google_oidc"] = "none"
     kb_auth_audience: str | None = None
     active_kb_version: str = Field(default="v3", pattern=r"^v[1-9][0-9]*$")
-    kb_fallback_versions: str = "v1"
+    kb_fallback_versions: str = ""
     allow_client_kb_version: bool = True
     kb_request_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
     chat_request_timeout_seconds: float = Field(default=45.0, gt=1, le=120)
@@ -57,7 +62,11 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
+        return [
+            item.strip()
+            for item in self.cors_allowed_origins.split(",")
+            if item.strip()
+        ]
 
     @property
     def kb_fallback_version_list(self) -> list[str]:

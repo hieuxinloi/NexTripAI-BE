@@ -13,7 +13,10 @@ from src.config import settings
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import create_chat_store
 from src.infra.weather import OpenMeteoWeatherClient
-from src.infra.llm import create_answer_generator
+from src.infra.llm import (
+    create_answer_generator,
+    create_conversation_contextualizer,
+)
 from src.shared.logging import configure_logging, install_request_logging
 from src.shared.telemetry import configure_telemetry
 from src.security.auth import Authenticator
@@ -33,6 +36,7 @@ async def lifespan(app: FastAPI):
         circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
     )
     answer_generator = create_answer_generator(app_settings)
+    conversation_contextualizer = create_conversation_contextualizer(app_settings)
     weather_client = OpenMeteoWeatherClient(
         app_settings.weather_timeout_seconds,
         retry_attempts=app_settings.resilience_retry_attempts,
@@ -46,9 +50,11 @@ async def lifespan(app: FastAPI):
         weather_client=weather_client,
         chat_store=chat_store,
         chat_history_limit=app_settings.chat_history_limit,
+        conversation_contextualizer=conversation_contextualizer,
     )
     app.state.kb_client = kb_client
     app.state.answer_generator = answer_generator
+    app.state.conversation_contextualizer = conversation_contextualizer
     app.state.weather_client = weather_client
     app.state.chat_store = chat_store
     app.state.settings = app_settings
@@ -66,6 +72,8 @@ async def lifespan(app: FastAPI):
         kb_client.close()
         if answer_generator is not None:
             answer_generator.close()
+        if conversation_contextualizer is not None:
+            conversation_contextualizer.close()
         weather_client.close()
         chat_store.close()
 
@@ -97,7 +105,12 @@ app = create_app()
 
 def main() -> None:
     app_settings = settings()
-    uvicorn.run("src.app:app", host=app_settings.nextrip_be_host, port=app_settings.nextrip_be_port, reload=True)
+    uvicorn.run(
+        "src.app:app",
+        host=app_settings.nextrip_be_host,
+        port=app_settings.nextrip_be_port,
+        reload=True,
+    )
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ class SupportsAnswerGeneration(Protocol):
         evidence: list[dict[str, Any]],
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
-    ) -> str:
-        ...
+        conversation_context: dict[str, Any] | None = None,
+    ) -> str: ...
 
 
 class SupportsAnswerSynthesis(SupportsAnswerGeneration, Protocol):
@@ -60,5 +60,5 @@ class SupportsAnswerSynthesis(SupportsAnswerGeneration, Protocol):
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
-    ) -> str:
-        ...
+        conversation_context: dict[str, Any] | None = None,
+    ) -> str: ...

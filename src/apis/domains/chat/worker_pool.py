@@ -13,6 +13,9 @@ from loguru import logger
 from src.apis.domains.chat.schemas import ChatRequest, ChatResponse
 from src.apis.domains.chat.service import handle_chat
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
+from src.core_ai.nextrip_agent.conversation import (
+    SupportsConversationContextualization,
+)
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
 from src.infra.weather import OpenMeteoWeatherClient
@@ -47,6 +50,8 @@ class ChatWorkerPool:
         weather_client: OpenMeteoWeatherClient | None = None,
         chat_store: ChatStore | None = None,
         chat_history_limit: int = 8,
+        conversation_contextualizer: SupportsConversationContextualization
+        | None = None,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be positive")
@@ -58,6 +63,7 @@ class ChatWorkerPool:
         self._weather_client = weather_client
         self._chat_store = chat_store
         self._chat_history_limit = chat_history_limit
+        self._conversation_contextualizer = conversation_contextualizer
         self._send_stream: MemoryObjectSendStream[ChatJob] | None = None
         self._active_jobs = 0
 
@@ -176,6 +182,7 @@ class ChatWorkerPool:
                                 weather_client=self._weather_client,
                                 chat_store=self._chat_store,
                                 chat_history_limit=self._chat_history_limit,
+                                conversation_contextualizer=self._conversation_contextualizer,
                             )
                         job.result = await to_thread.run_sync(
                             handler,

@@ -71,6 +71,7 @@ def record_llm_usage(
     input_tokens: int,
     output_tokens: int,
     *,
+    thinking_tokens: int = 0,
     input_cost_per_million: float,
     output_cost_per_million: float,
 ) -> None:
@@ -78,9 +79,10 @@ def record_llm_usage(
         return
     _llm_tokens.add(input_tokens, {"model": model, "direction": "input"})
     _llm_tokens.add(output_tokens, {"model": model, "direction": "output"})
+    _llm_tokens.add(thinking_tokens, {"model": model, "direction": "thinking"})
     if _llm_cost is not None:
         estimated_cost = (
             input_tokens * input_cost_per_million
-            + output_tokens * output_cost_per_million
+            + (output_tokens + thinking_tokens) * output_cost_per_million
         ) / 1_000_000
         _llm_cost.add(estimated_cost, {"model": model})

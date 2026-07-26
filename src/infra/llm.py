@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
 from src.config import Settings
 from src.core_ai.nextrip_agent.answer_generation import fact_value_text
+from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.shared.logging import safe_text
 from src.shared.telemetry import record_llm_usage, span
 
@@ -42,7 +43,128 @@ reference into a labelled sentence or bullet; never append bare FACT references.
 Keep the answer concise and useful. Do not mention internal retrieval, JSON, nodes, or scores.
 Start with the useful answer directly; do not say that you only have data or lack enough
 information when grounded places are available.
+Conversation memory is only for continuity, preferences, and resolving user intent.
+Never treat a previous assistant answer as verified factual evidence. Current facts must
+come from verified_facts, retrieved_places, matched_graph_paths, or weather_assessment.
 """
+
+CONVERSATION_SYSTEM_INSTRUCTION = """You are NexTripAI's conversation contextualizer.
+Read the ordered transcript and decide how the current user turn should be handled.
+
+Return route="conversation" only when the user asks about the conversation itself and
+the answer is fully contained in the supplied transcript, for example what they
+previously asked or what the assistant previously answered. In that case, answer
+faithfully from the transcript and do not add travel facts.
+
+Return route="travel" for every request that needs travel knowledge, recommendations,
+weather, or current external facts. Rewrite it as one self-contained standalone_message,
+resolving pronouns, omitted subjects, preferences, places, dates, and entities from the
+transcript. Preserve the user's intent and language. Never invent missing information.
+If a reference is genuinely ambiguous, keep the original wording instead of guessing.
+
+Write a compact Vietnamese rolling summary of durable user preferences, decisions,
+travel constraints, and the conversation's important outcomes. Do not include secrets,
+implementation details, or unsupported facts.
+"""
+
+
+class GeminiConversationContextualizer:
+    def __init__(self, app_settings: Settings):
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise RuntimeError(
+                "Missing google-genai. Install BE dependencies with: "
+                "pip install -r requirements.txt"
+            ) from exc
+        if not app_settings.google_api_key:
+            raise RuntimeError(
+                "Conversation contextualization requires GOOGLE_API_KEY."
+            )
+        self._types = types
+        self._model = app_settings.gemini_context_model
+        self._thinking_level = app_settings.gemini_thinking_level
+        self._summary_max_chars = app_settings.conversation_summary_max_chars
+        self._input_cost_per_million = app_settings.gemini_input_cost_per_million_usd
+        self._output_cost_per_million = app_settings.gemini_output_cost_per_million_usd
+        self._client = genai.Client(
+            api_key=app_settings.google_api_key,
+            http_options=types.HttpOptions(
+                timeout=int(app_settings.conversation_context_timeout_seconds * 1000)
+            ),
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def contextualize(
+        self,
+        *,
+        message: str,
+        history: list[dict[str, Any]],
+        prior_summary: str | None,
+        structured_context: dict[str, Any],
+    ) -> ConversationResolution:
+        transcript = [
+            {
+                "role": str(item.get("role") or ""),
+                "content": str(item.get("content") or "")[:1600],
+            }
+            for item in history
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        ]
+        prompt = {
+            "prior_summary": prior_summary,
+            "recent_transcript": transcript,
+            "structured_trip_context": structured_context,
+            "current_user_message": message,
+            "summary_max_characters": self._summary_max_chars,
+        }
+        with span("gemini.contextualize_conversation", model=self._model):
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=json.dumps(prompt, ensure_ascii=False, separators=(",", ":")),
+                config=self._types.GenerateContentConfig(
+                    system_instruction=CONVERSATION_SYSTEM_INSTRUCTION,
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=ConversationResolution,
+                    thinking_config=self._types.ThinkingConfig(
+                        thinking_level=self._thinking_level,
+                    ),
+                ),
+            )
+        parsed = response.parsed
+        resolution = (
+            cast(ConversationResolution, parsed)
+            if parsed is not None
+            else ConversationResolution.model_validate_json(response.text or "{}")
+        )
+        if resolution.summary:
+            resolution.summary = resolution.summary[: self._summary_max_chars]
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+        record_llm_usage(
+            self._model,
+            input_tokens,
+            output_tokens,
+            thinking_tokens=thinking_tokens,
+            input_cost_per_million=self._input_cost_per_million,
+            output_cost_per_million=self._output_cost_per_million,
+        )
+        logger.info(
+            "Conversation contextualized model={} route={} input_tokens={} "
+            "output_tokens={} thinking_tokens={}",
+            self._model,
+            resolution.route,
+            input_tokens,
+            output_tokens,
+            thinking_tokens,
+        )
+        return resolution
 
 
 class GeminiAnswerGenerator:
@@ -56,7 +178,8 @@ class GeminiAnswerGenerator:
             ) from exc
 
         self._types = types
-        self._model = app_settings.gemini_model
+        self._model = app_settings.gemini_answer_model
+        self._thinking_level = app_settings.gemini_thinking_level
         self._temperature = app_settings.answer_temperature
         self._input_cost_per_million = app_settings.gemini_input_cost_per_million_usd
         self._output_cost_per_million = app_settings.gemini_output_cost_per_million_usd
@@ -64,9 +187,7 @@ class GeminiAnswerGenerator:
             timeout=int(app_settings.gemini_timeout_seconds * 1000)
         )
         if not app_settings.google_api_key:
-            raise RuntimeError(
-                "Gemini answer generation requires GOOGLE_API_KEY."
-            )
+            raise RuntimeError("Gemini answer generation requires GOOGLE_API_KEY.")
         self._client = genai.Client(
             api_key=app_settings.google_api_key,
             http_options=http_options,
@@ -83,6 +204,7 @@ class GeminiAnswerGenerator:
         evidence: list[dict[str, Any]],
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
+        conversation_context: dict[str, Any] | None = None,
     ) -> str:
         return self._generate(
             question=question,
@@ -91,6 +213,7 @@ class GeminiAnswerGenerator:
             facts=facts,
             matched_paths=matched_paths,
             weather=None,
+            conversation_context=conversation_context,
         )
 
     def synthesize(
@@ -102,6 +225,7 @@ class GeminiAnswerGenerator:
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> str:
         return self._generate(
             question=question,
@@ -110,6 +234,7 @@ class GeminiAnswerGenerator:
             facts=facts,
             matched_paths=matched_paths,
             weather=weather,
+            conversation_context=conversation_context,
         )
 
     def _generate(
@@ -121,6 +246,7 @@ class GeminiAnswerGenerator:
         facts: list[dict[str, Any]],
         matched_paths: list[dict[str, Any]],
         weather: dict[str, Any] | None,
+        conversation_context: dict[str, Any] | None,
     ) -> str:
         context, replacements = _protected_context(
             question=question,
@@ -129,6 +255,7 @@ class GeminiAnswerGenerator:
             facts=facts,
             matched_paths=matched_paths,
             weather=weather,
+            conversation_context=conversation_context,
         )
         with span("gemini.generate_answer", model=self._model, answer_type=answer_type):
             response = self._client.models.generate_content(
@@ -137,6 +264,9 @@ class GeminiAnswerGenerator:
                 config=self._types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     temperature=self._temperature,
+                    thinking_config=self._types.ThinkingConfig(
+                        thinking_level=self._thinking_level,
+                    ),
                 ),
             )
         raw_answer = (response.text or "").strip()
@@ -149,21 +279,27 @@ class GeminiAnswerGenerator:
         usage = getattr(response, "usage_metadata", None)
         input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
         output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
         record_llm_usage(
             self._model,
             input_tokens,
             output_tokens,
+            thinking_tokens=thinking_tokens,
             input_cost_per_million=self._input_cost_per_million,
             output_cost_per_million=self._output_cost_per_million,
         )
         logger.info(
-            "NexTrip answer generated model={} input_tokens={} output_tokens={} answer_len={}",
+            "NexTrip answer generated model={} input_tokens={} output_tokens={} "
+            "thinking_tokens={} answer_len={}",
             self._model,
             input_tokens,
             output_tokens,
+            thinking_tokens,
             len(grounded_answer),
         )
-        logger.debug("NexTrip grounded answer preview={}", safe_text(grounded_answer, 500))
+        logger.debug(
+            "NexTrip grounded answer preview={}", safe_text(grounded_answer, 500)
+        )
         return grounded_answer
 
 
@@ -175,6 +311,7 @@ def _protected_context(
     facts: list[dict[str, Any]],
     matched_paths: list[dict[str, Any]],
     weather: dict[str, Any] | None = None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     replacements: dict[str, str] = {}
     place_references: dict[str, str] = {}
@@ -194,13 +331,15 @@ def _protected_context(
                 replacements[city_reference] = city_name
         replacements[reference] = str(place.get("name") or place_id)
         place_references[place_id] = reference
-        protected_places.append({
-            "reference": reference,
-            "city": city_reference,
-            "entity_type": place.get("entity_type"),
-            "category": place.get("category"),
-            "attributes": place.get("attributes") or {},
-        })
+        protected_places.append(
+            {
+                "reference": reference,
+                "city": city_reference,
+                "entity_type": place.get("entity_type"),
+                "category": place.get("category"),
+                "attributes": place.get("attributes") or {},
+            }
+        )
 
     protected_question = question
     named_references = sorted(
@@ -226,24 +365,27 @@ def _protected_context(
         value = fact_value_text(fact["value"])
         unit = fact.get("unit")
         replacements[reference] = f"{value} {unit}" if unit else value
-        protected_facts.append({
-            "reference": reference,
-            "subject": place_references.get(str(fact.get("subject_id"))),
-            "predicate": fact.get("predicate"),
-            "entity_type": fact.get("entity_type"),
-        })
+        protected_facts.append(
+            {
+                "reference": reference,
+                "subject": place_references.get(str(fact.get("subject_id"))),
+                "predicate": fact.get("predicate"),
+                "entity_type": fact.get("entity_type"),
+            }
+        )
 
     protected_paths = []
     for path in matched_paths:
         place_id = str(path.get("place_id") or "")
-        protected_paths.append({
-            "subject": place_references.get(place_id),
-            "concepts": [
-                node for node in path.get("nodes", [])
-                if node != place_id
-            ],
-            "relationships": path.get("relationships", []),
-        })
+        protected_paths.append(
+            {
+                "subject": place_references.get(place_id),
+                "concepts": [
+                    node for node in path.get("nodes", []) if node != place_id
+                ],
+                "relationships": path.get("relationships", []),
+            }
+        )
 
     return (
         {
@@ -253,6 +395,7 @@ def _protected_context(
             "verified_facts": protected_facts,
             "matched_graph_paths": protected_paths,
             "weather_assessment": weather,
+            "conversation_memory": conversation_context,
         },
         replacements,
     )
@@ -300,7 +443,18 @@ def create_answer_generator(app_settings: Settings) -> GeminiAnswerGenerator | N
     if app_settings.answer_generation_mode == "template":
         return None
     if app_settings.answer_generation_mode != "gemini":
-        raise ValueError(
-            "ANSWER_GENERATION_MODE must be either 'template' or 'gemini'"
-        )
+        raise ValueError("ANSWER_GENERATION_MODE must be either 'template' or 'gemini'")
     return GeminiAnswerGenerator(app_settings)
+
+
+def create_conversation_contextualizer(
+    app_settings: Settings,
+) -> GeminiConversationContextualizer | None:
+    if not app_settings.conversation_context_enabled:
+        return None
+    if not app_settings.google_api_key:
+        logger.warning(
+            "Conversation contextualization disabled because GOOGLE_API_KEY is not set"
+        )
+        return None
+    return GeminiConversationContextualizer(app_settings)

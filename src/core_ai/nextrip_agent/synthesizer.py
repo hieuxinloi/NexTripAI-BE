@@ -36,6 +36,7 @@ def synthesize_answer(
     weather_requested: bool,
     weather_trace: dict[str, Any],
     answer_generator: SupportsAnswerGeneration | None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> SynthesisResult:
     unresolved_tools = list(graph.required_tools)
     if weather is not None:
@@ -71,6 +72,7 @@ def synthesize_answer(
                     facts=facts_for_answer(graph.facts),
                     matched_paths=graph.matched_paths,
                     weather=weather.model_dump(mode="json") if weather else None,
+                    conversation_context=conversation_context,
                 )
                 return SynthesisResult(
                     answer=answer,
@@ -89,6 +91,7 @@ def synthesize_answer(
                     evidence=graph.evidence,
                     facts=facts_for_answer(graph.facts),
                     matched_paths=graph.matched_paths,
+                    conversation_context=conversation_context,
                 )
                 return SynthesisResult(
                     answer=answer,

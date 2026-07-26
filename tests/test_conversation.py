@@ -3,8 +3,9 @@ from __future__ import annotations
 from src.apis.domains.chat.schemas import ChatRequest
 from src.apis.domains.chat.service import handle_chat
 from src.core_ai.nextrip_agent.conversation import (
-    contextualize_message,
+    ConversationResolution,
     resolve_conversation_context,
+    resolve_turn,
 )
 from src.infra.chat_store import InMemoryChatStore
 from src.infra.weather import DailyForecast
@@ -89,6 +90,30 @@ class GroundedAnswerGenerator:
         return self.generate(**kwargs)
 
 
+class FoodFollowUpContextualizer:
+    def contextualize(self, **kwargs):
+        history = kwargs["history"]
+        entities = history[-1]["metadata"]["referenced_entities"]
+        dishes = ", ".join(item["name"] for item in entities)
+        return ConversationResolution(
+            route="travel",
+            standalone_message=f"Tìm quán ở Quy Nhơn bán {dishes}",
+            summary="Người dùng quan tâm đến các món đặc sản Quy Nhơn.",
+            confidence=0.99,
+        )
+
+
+class ConversationRecallContextualizer:
+    def contextualize(self, **kwargs):
+        return ConversationResolution(
+            route="conversation",
+            standalone_message=kwargs["message"],
+            direct_answer="Câu trước bạn đã hỏi: Quy Nhơn có món gì ngon?",
+            summary="Người dùng hỏi về món ngon Quy Nhơn.",
+            confidence=1,
+        )
+
+
 def test_context_resolver_prefers_explicit_city() -> None:
     context = resolve_conversation_context(
         message="Thời tiết ngày mai thế nào?",
@@ -139,6 +164,8 @@ def test_weather_follow_up_inherits_city_from_session() -> None:
         "travel_date_source": None,
         "recent_place_ids": [],
         "recent_dishes": [],
+        "conversation_route": "travel",
+        "contextualized": False,
     }
     assert response.weather is not None
     assert response.weather.location == "Quy Nhơn"
@@ -185,13 +212,28 @@ def test_food_follow_up_expands_recent_dishes_from_assistant_metadata() -> None:
         ],
     )
 
-    query = contextualize_message(
-        "Cho tôi địa chỉ các quán bán các món này",
-        context,
+    resolved = resolve_turn(
+        message="Cho tôi địa chỉ các quán bán các món này",
+        history=[
+            {"role": "user", "content": "Ở Quy Nhơn có món gì ngon?"},
+            {
+                "role": "assistant",
+                "content": "Bánh hỏi và bún cá.",
+                "city": "Quy Nhơn",
+                "metadata": {
+                    "referenced_entities": [
+                        {"id": "dish:banh-hoi", "name": "bánh hỏi", "kind": "dish"},
+                        {"id": "dish:bun-ca", "name": "bún cá", "kind": "dish"},
+                    ]
+                },
+            },
+        ],
+        context=context,
+        contextualizer=FoodFollowUpContextualizer(),
     )
 
     assert context.recent_dishes == ("bánh hỏi", "bún cá")
-    assert "bánh hỏi, bún cá" in query
+    assert "bánh hỏi, bún cá" in resolved.resolution.standalone_message
     assert context.city == "Quy Nhơn"
 
 
@@ -220,10 +262,45 @@ def test_food_follow_up_is_contextualized_across_chat_turns() -> None:
         kb_client,
         generator,
         chat_store=store,
+        conversation_contextualizer=FoodFollowUpContextualizer(),
     )
 
     assert [item.entity_type for item in first.evidence] == ["dish", "dish"]
-    assert "Các món được nhắc đến ở lượt trước: bánh hỏi, bún cá" in kb_client.queries[1]
+    assert kb_client.queries[1] == "Tìm quán ở Quy Nhơn bán bánh hỏi, bún cá"
     assert second.resolved_context["recent_dishes"] == ["bánh hỏi", "bún cá"]
+    assert second.resolved_context["contextualized"] is True
     assert second.evidence[0].attributes["address"].startswith("22 Phan Bội Châu")
     assert second.missing_fields == []
+
+
+def test_conversation_recall_is_answered_from_history_without_kb_call() -> None:
+    store = InMemoryChatStore()
+    store.save_message(
+        "recall",
+        "previous-user",
+        "user",
+        "Quy Nhơn có món gì ngon?",
+    )
+    store.save_message(
+        "recall",
+        "previous-assistant",
+        "assistant",
+        "Bánh hỏi và bún cá.",
+    )
+
+    response = handle_chat(
+        ChatRequest(
+            message="Câu trước tôi đã hỏi gì?",
+            session_id="recall",
+            kb_version="v5",
+        ),
+        FailingKbClient(),
+        chat_store=store,
+        conversation_contextualizer=ConversationRecallContextualizer(),
+    )
+
+    assert response.intent == "conversation_memory"
+    assert response.orchestration_mode == "conversation"
+    assert response.answer == "Câu trước bạn đã hỏi: Quy Nhơn có món gì ngon?"
+    assert response.evidence == []
+    assert store.get_session_memory("recall")["summary"]

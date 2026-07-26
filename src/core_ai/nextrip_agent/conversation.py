@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Literal, Protocol
+
+from loguru import logger
+from pydantic import BaseModel, Field, model_validator
 
 from src.core_ai.nextrip_agent.weather import normalize_text
 
@@ -11,6 +14,35 @@ SUPPORTED_CITIES = {
     "da nang": "Đà Nẵng",
     "quy nhon": "Quy Nhơn",
 }
+
+
+class ConversationResolution(BaseModel):
+    """A model-produced decision for one turn of a multi-turn conversation."""
+
+    route: Literal["travel", "conversation"] = "travel"
+    standalone_message: str = Field(min_length=1, max_length=4000)
+    direct_answer: str | None = Field(default=None, max_length=4000)
+    summary: str | None = Field(default=None, max_length=4000)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def conversation_requires_an_answer(self) -> "ConversationResolution":
+        if self.route == "conversation" and not (self.direct_answer or "").strip():
+            raise ValueError("A conversation route requires direct_answer")
+        if self.route == "travel":
+            self.direct_answer = None
+        return self
+
+
+class SupportsConversationContextualization(Protocol):
+    def contextualize(
+        self,
+        *,
+        message: str,
+        history: list[dict[str, Any]],
+        prior_summary: str | None,
+        structured_context: dict[str, Any],
+    ) -> ConversationResolution: ...
 
 
 @dataclass(frozen=True)
@@ -47,6 +79,27 @@ class ConversationContext:
         }
 
 
+@dataclass(frozen=True)
+class ResolvedTurn:
+    resolution: ConversationResolution
+    status: Literal["completed", "fallback", "skipped"]
+    reason: str
+    original_message: str
+
+    def trace_event(self) -> dict[str, Any]:
+        return {
+            "node": "conversation_contextualizer",
+            "status": self.status,
+            "route": self.resolution.route,
+            "contextualized": (
+                self.resolution.standalone_message.strip()
+                != self.original_message.strip()
+            ),
+            "confidence": self.resolution.confidence,
+            "reason": self.reason,
+        }
+
+
 def resolve_conversation_context(
     *,
     message: str,
@@ -56,7 +109,11 @@ def resolve_conversation_context(
 ) -> ConversationContext:
     history_date, recent_place_ids, recent_dishes = _history_state(history)
     travel_date = explicit_travel_date or history_date
-    travel_date_source = "request" if explicit_travel_date else ("session_metadata" if history_date else None)
+    travel_date_source = (
+        "request"
+        if explicit_travel_date
+        else ("session_metadata" if history_date else None)
+    )
     city = _city_in_text(message)
     if city:
         return ConversationContext(
@@ -117,21 +174,66 @@ def resolve_conversation_context(
     )
 
 
-def contextualize_message(message: str, context: ConversationContext) -> str:
-    """Resolve short food follow-ups without changing the stored user message."""
-    normalized = normalize_text(message)
-    dish_references = (
-        "cac mon nay",
-        "cac mon tren",
-        "nhung mon nay",
-        "nhung mon tren",
+def resolve_turn(
+    *,
+    message: str,
+    history: list[dict[str, Any]],
+    context: ConversationContext,
+    contextualizer: SupportsConversationContextualization | None,
+    prior_summary: str | None = None,
+) -> ResolvedTurn:
+    """Resolve references generically; never make chat availability depend on Gemini."""
+    fallback = ConversationResolution(
+        route="travel",
+        standalone_message=message,
+        summary=prior_summary,
+        confidence=0,
     )
-    if not context.recent_dishes or not any(
-        reference in normalized for reference in dish_references
-    ):
-        return message
-    dishes = ", ".join(context.recent_dishes)
-    return f"{message}\nCác món được nhắc đến ở lượt trước: {dishes}."
+    if not history:
+        return ResolvedTurn(fallback, "skipped", "first_turn", message)
+    if contextualizer is None:
+        return ResolvedTurn(
+            fallback,
+            "skipped",
+            "contextualizer_not_configured",
+            message,
+        )
+    try:
+        resolution = contextualizer.contextualize(
+            message=message,
+            history=history,
+            prior_summary=prior_summary,
+            structured_context=context.to_dict(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Conversation contextualization failed error_type={}; using original message",
+            exc.__class__.__name__,
+        )
+        return ResolvedTurn(fallback, "fallback", exc.__class__.__name__, message)
+    return ResolvedTurn(resolution, "completed", "model_decision", message)
+
+
+def answer_memory_context(
+    *,
+    history: list[dict[str, Any]],
+    resolved_turn: ResolvedTurn,
+) -> dict[str, Any] | None:
+    if not history:
+        return None
+    turns = []
+    for item in history:
+        role = str(item.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            turns.append({"role": role, "content": content[:1600]})
+    return {
+        "summary": resolved_turn.resolution.summary,
+        "recent_turns": turns,
+        "standalone_question": resolved_turn.resolution.standalone_message,
+    }
 
 
 def _history_state(

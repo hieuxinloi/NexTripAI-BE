@@ -9,8 +9,10 @@ from src.apis.domains.chat.schemas import ChatRequest, ChatResponse, EvidenceIte
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.constants import is_typed_kb_version
 from src.core_ai.nextrip_agent.conversation import (
-    contextualize_message,
+    SupportsConversationContextualization,
+    answer_memory_context,
     resolve_conversation_context,
+    resolve_turn,
 )
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
@@ -42,6 +44,7 @@ def handle_chat(
     weather_client: OpenMeteoWeatherClient | None = None,
     chat_store: ChatStore | None = None,
     chat_history_limit: int = 8,
+    conversation_contextualizer: SupportsConversationContextualization | None = None,
 ) -> ChatResponse:
     started_at = perf_counter()
     user_id = getattr(request, "user_id", None)
@@ -54,13 +57,25 @@ def handle_chat(
         chat_history_limit,
         user_id=user_id,
     )
+    session_memory = _get_session_memory(
+        chat_store,
+        request.session_id,
+        user_id=user_id,
+    )
     context = resolve_conversation_context(
         message=request.message,
         explicit_city=request.city,
         history=history,
         explicit_travel_date=request.travel_date,
     )
-    graph_message = contextualize_message(request.message, context)
+    resolved_turn = resolve_turn(
+        message=request.message,
+        history=history,
+        context=context,
+        contextualizer=conversation_contextualizer,
+        prior_summary=str(session_memory.get("summary") or "") or None,
+    )
+    graph_message = resolved_turn.resolution.standalone_message
     _save_message(
         chat_store,
         request,
@@ -70,7 +85,10 @@ def handle_chat(
         city=context.city,
         metadata={
             "context_city_source": context.city_source,
-            "travel_date": request.travel_date.isoformat() if request.travel_date else None,
+            "travel_date": request.travel_date.isoformat()
+            if request.travel_date
+            else None,
+            "conversation_route": resolved_turn.resolution.route,
         },
     )
     logger.info(
@@ -81,6 +99,47 @@ def handle_chat(
         top_k,
         len(request.message),
     )
+    if resolved_turn.resolution.route == "conversation":
+        answer = str(resolved_turn.resolution.direct_answer or "").strip()
+        trace = [context.trace_event(), resolved_turn.trace_event()]
+        resolved_context = _resolved_context(context.to_dict(), resolved_turn)
+        response = ChatResponse(
+            session_id=request.session_id,
+            message_id=assistant_message_id,
+            answer=answer,
+            intent="conversation_memory",
+            orchestration_mode="conversation",
+            resolved_context=resolved_context,
+            kb_version=request.kb_version,
+            trace=trace,
+        )
+        _save_message(
+            chat_store,
+            request,
+            assistant_message_id,
+            "assistant",
+            answer,
+            city=context.city,
+            metadata={
+                "kb_version": request.kb_version,
+                "resolved_context": resolved_context,
+                "trace": trace,
+            },
+        )
+        _save_summary(
+            chat_store,
+            request.session_id,
+            resolved_turn.resolution.summary,
+            user_id=user_id,
+        )
+        logger.info(
+            "Chat turn end session_id={} route=conversation answer_len={} elapsed_ms={}",
+            request.session_id,
+            len(answer),
+            int((perf_counter() - started_at) * 1000),
+        )
+        return response
+
     orchestration = TravelOrchestrator(kb_client, weather_client).run(
         message=graph_message,
         session_id=request.session_id,
@@ -107,10 +166,15 @@ def handle_chat(
         weather_requested=orchestration.plan.run_weather,
         weather_trace=orchestration.weather_trace,
         answer_generator=answer_generator,
+        conversation_context=answer_memory_context(
+            history=history,
+            resolved_turn=resolved_turn,
+        ),
     )
     answer = synthesis.answer
     trace = [
         context.trace_event(),
+        resolved_turn.trace_event(),
         *orchestration.trace,
         *agent_result.trace,
         orchestration.weather_trace,
@@ -124,17 +188,20 @@ def handle_chat(
         len(answer),
         int((perf_counter() - started_at) * 1000),
     )
+    resolved_context = _resolved_context(context.to_dict(), resolved_turn)
     response = ChatResponse(
         session_id=request.session_id,
         message_id=assistant_message_id,
         answer=answer,
         intent=agent_result.answer_type,
         orchestration_mode=orchestration.plan.mode.value,
-        resolved_context=context.to_dict(),
+        resolved_context=resolved_context,
         kb_version=request.kb_version,
         facts=agent_result.facts,
         evidence=evidence,
-        recommendations=evidence if agent_result.answer_type == "recommendation" else [],
+        recommendations=evidence
+        if agent_result.answer_type == "recommendation"
+        else [],
         missing_fields=agent_result.missing_fields,
         trace=trace,
         query_plan=agent_result.query_plan,
@@ -158,11 +225,27 @@ def handle_chat(
             "travel_date": (request.travel_date or context.travel_date).isoformat()
             if (request.travel_date or context.travel_date)
             else None,
-            "resolved_context": context.to_dict(),
+            "resolved_context": resolved_context,
             "trace": trace,
         },
     )
+    _save_summary(
+        chat_store,
+        request.session_id,
+        resolved_turn.resolution.summary,
+        user_id=user_id,
+    )
     return response
+
+
+def _resolved_context(context: dict, resolved_turn) -> dict:
+    return context | {
+        "conversation_route": resolved_turn.resolution.route,
+        "contextualized": (
+            resolved_turn.resolution.standalone_message.strip()
+            != resolved_turn.original_message.strip()
+        ),
+    }
 
 
 def _referenced_entities(evidence: list[EvidenceItem]) -> list[dict[str, str]]:
@@ -225,3 +308,45 @@ def _recent_messages(
             exc.__class__.__name__,
         )
         return []
+
+
+def _get_session_memory(
+    chat_store: ChatStore | None,
+    session_id: str,
+    *,
+    user_id: str | None = None,
+) -> dict:
+    if chat_store is None:
+        return {}
+    try:
+        return chat_store.get_session_memory(session_id, user_id=user_id)
+    except Exception as exc:
+        logger.exception(
+            "Conversation memory load failed session_id={} error_type={}",
+            session_id,
+            exc.__class__.__name__,
+        )
+        return {}
+
+
+def _save_summary(
+    chat_store: ChatStore | None,
+    session_id: str,
+    summary: str | None,
+    *,
+    user_id: str | None = None,
+) -> None:
+    if chat_store is None or not summary:
+        return
+    try:
+        chat_store.save_session_memory(
+            session_id,
+            {"summary": summary},
+            user_id=user_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Conversation memory save failed session_id={} error_type={}",
+            session_id,
+            exc.__class__.__name__,
+        )

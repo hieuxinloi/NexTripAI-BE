@@ -106,7 +106,14 @@ async def health(request: Request) -> dict[str, object]:
             if request.app.state.answer_generator is not None
             else "template"
         ),
-        "gemini_model": request.app.state.settings.gemini_model,
+        "conversation_memory": (
+            "gemini_contextualizer"
+            if request.app.state.conversation_contextualizer is not None
+            else "structured_context_only"
+        ),
+        "gemini_context_model": request.app.state.settings.gemini_context_model,
+        "gemini_answer_model": request.app.state.settings.gemini_answer_model,
+        "gemini_thinking_level": request.app.state.settings.gemini_thinking_level,
         "auth_mode": request.app.state.settings.auth_mode,
         "active_kb_version": request.app.state.settings.active_kb_version,
         "worker_pool": worker_pool.statistics(),
