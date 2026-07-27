@@ -78,7 +78,12 @@ def answer_node(
     elif missing_fields:
         answer = _clarification_answer(missing_fields)
     elif is_typed_kb_version(state.get("kb_version")) and facts:
-        answer = _format_typed_facts(evidence, facts, state.get("kb_version") or DEFAULT_TYPED_KB_VERSION)
+        answer = _format_typed_facts(
+            evidence,
+            facts,
+            state.get("kb_version") or DEFAULT_TYPED_KB_VERSION,
+            state.get("query_plan") or {},
+        )
     elif is_typed_kb_version(state.get("kb_version")) and state.get("answer_type") == "entity_detail":
         answer = f"Không tìm thấy địa điểm khớp đủ tin cậy trong Knowledge Base {str(state.get('kb_version')).upper()}."
     elif state.get("answer_type") == "unsupported":
@@ -91,7 +96,13 @@ def answer_node(
             lines.append(_format_evidence_line(index, item))
         answer = "\n".join(lines)
     generation_mode = "template"
-    if answer_generator is not None and (evidence or facts) and not missing_fields and not required_tools:
+    if (
+        answer_generator is not None
+        and state.get("answer_type") != "aggregate_count"
+        and (evidence or facts)
+        and not missing_fields
+        and not required_tools
+    ):
         try:
             answer = answer_generator.generate(
                 question=state["message"],
@@ -159,7 +170,12 @@ def _clarification_answer(missing_fields: list[str]) -> str:
     return f"Bạn vui lòng bổ sung {', '.join(readable)}."
 
 
-def _format_typed_facts(evidence: list[dict], facts: list[dict], kb_version: str) -> str:
+def _format_typed_facts(
+    evidence: list[dict],
+    facts: list[dict],
+    kb_version: str,
+    query_plan: dict,
+) -> str:
     count_facts = [fact for fact in facts if fact.get("predicate") == "count"]
     if count_facts:
         labels = {
@@ -169,6 +185,18 @@ def _format_typed_facts(evidence: list[dict], facts: list[dict], kb_version: str
             "nightlife": "Địa điểm nightlife",
             "restaurant": "Nhà hàng",
         }
+        if len(count_facts) == 1:
+            fact = count_facts[0]
+            label = labels.get(
+                fact.get("entity_type"),
+                fact.get("entity_type") or "Địa điểm",
+            ).lower()
+            cities = query_plan.get("geo_scope", {}).get("cities", [])
+            scope = f"Ở {cities[0]} " if cities else ""
+            return (
+                f"{scope}có tổng cộng {fact['value']} {label} "
+                "để bạn lựa chọn."
+            )
         lines = [f"Knowledge Base {kb_version.upper()} đếm được:"]
         for fact in count_facts:
             label = labels.get(fact.get("entity_type"), fact.get("entity_type") or "Địa điểm")

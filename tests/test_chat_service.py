@@ -334,6 +334,34 @@ def test_v2_answer_formats_count_breakdown() -> None:
     assert "Khách sạn: 30" in state["answer"]
 
 
+def test_aggregate_count_uses_verified_fact_without_llm_rewrite() -> None:
+    generator = FakeAnswerGenerator("sai: 3 địa điểm ban đêm 18")
+
+    state = answer_node(
+        {
+            "session_id": "count-v8",
+            "kb_version": "v8",
+            "answer_type": "aggregate_count",
+            "query_plan": {"geo_scope": {"cities": ["Quy Nhơn"]}},
+            "facts": [
+                {
+                    "predicate": "count",
+                    "entity_type": "nightlife",
+                    "value": 18,
+                }
+            ],
+            "evidence": [],
+            "trace": [],
+        },
+        answer_generator=generator,
+    )
+
+    assert state["answer"] == (
+        "Ở Quy Nhơn có tổng cộng 18 địa điểm nightlife để bạn lựa chọn."
+    )
+    assert generator.calls == []
+
+
 def test_v2_missing_entity_is_not_reported_as_service_failure() -> None:
     state = answer_node(
         {
