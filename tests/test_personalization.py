@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from src.apis.domains.admin.router import _merge_firebase_users
 from src.app import create_app
 from src.core_ai.personalization.models import PersonalizationProfile
+from src.core_ai.personalization.service import compile_personalization_context
 from src.infra.user_profile_store import FirestoreUserProfileStore
 
 
@@ -34,6 +35,38 @@ def test_user_can_update_and_reset_own_preferences() -> None:
         reset = client.delete("/api/me/preferences", headers=headers)
         assert reset.status_code == 200
         assert reset.json()["preferred_concepts"] == []
+
+
+def test_stale_profile_revision_is_reported_as_conflict() -> None:
+    app = create_app()
+    headers = {"X-Dev-User-ID": "revision-user"}
+    with TestClient(app) as client:
+        first = client.patch(
+            "/api/me/preferences",
+            headers=headers,
+            json={"party_type": "family"},
+        )
+        stale = client.patch(
+            "/api/me/preferences",
+            headers=headers,
+            json={"budget_level": "premium", "expected_revision": 0},
+        )
+
+    assert first.status_code == 200
+    assert first.json()["profile_revision"] == 1
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == "Profile revision is stale."
+
+
+def test_disabled_personalization_compiles_to_an_empty_chat_contract() -> None:
+    profile = PersonalizationProfile(
+        user_id="quiet-user",
+        personalization_enabled=False,
+        preferred_concepts=["beach"],
+        preferred_cities=["Quy Nhon"],
+    )
+
+    assert compile_personalization_context(profile) == {}
 
 
 def test_admin_requires_role_and_can_list_users() -> None:
