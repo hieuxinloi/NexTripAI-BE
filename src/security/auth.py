@@ -20,6 +20,16 @@ class Principal:
         role = str(self.claims.get("role") or "user").strip().lower()
         return role if role in {"user", "support", "admin"} else "user"
 
+    @property
+    def is_anonymous(self) -> bool:
+        if self.auth_mode != "firebase":
+            return True
+        firebase_claim = self.claims.get("firebase")
+        return (
+            isinstance(firebase_claim, dict)
+            and firebase_claim.get("sign_in_provider") == "anonymous"
+        )
+
 
 class Authenticator:
     def __init__(self, app_settings: Settings) -> None:

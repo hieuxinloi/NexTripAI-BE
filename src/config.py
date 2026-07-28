@@ -4,7 +4,7 @@ from functools import lru_cache
 import re
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = Field(default=30.0, gt=0, le=600)
     telemetry_enabled: bool = False
     otel_service_name: str = "nextrip-be"
+
+    @model_validator(mode="after")
+    def require_production_authentication(self) -> "Settings":
+        if self.environment == "production" and self.auth_mode != "firebase":
+            raise ValueError("Production requires AUTH_MODE=firebase.")
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

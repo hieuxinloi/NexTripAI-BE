@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 
 from src.core_ai.personalization.models import (
     PersonalizationProfile,
@@ -15,6 +16,25 @@ from src.security.auth import Principal, current_principal
 
 
 router = APIRouter(prefix="/api/me", tags=["personalization"])
+
+
+class SessionIdentity(BaseModel):
+    user_id: str
+    role: str
+    auth_mode: str
+    is_anonymous: bool
+
+
+@router.get("", response_model=SessionIdentity)
+def get_session_identity(
+    principal: Principal = Depends(current_principal),
+) -> SessionIdentity:
+    return SessionIdentity(
+        user_id=principal.uid,
+        role=principal.role,
+        auth_mode=principal.auth_mode,
+        is_anonymous=principal.is_anonymous,
+    )
 
 
 def _store(request: Request) -> UserProfileStore:
@@ -60,4 +80,3 @@ def record_preference_event(
 ) -> dict[str, bool]:
     _store(request).save_event(principal.uid, payload)
     return {"accepted": True}
-
