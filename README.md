@@ -93,6 +93,9 @@ Implemented endpoints:
 - `DELETE /api/evaluations/{job_id}`
 - `GET /api/sessions/{session_id}/messages`
 - `DELETE /api/sessions/{session_id}`
+- `GET/PATCH/DELETE /api/me/preferences`
+- `POST /api/me/events`
+- `GET /api/admin/users` and GraphRAG deployment administration (admin/support claims)
 
 The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stores
 conversation messages plus rolling memory in memory or Firestore. It never connects

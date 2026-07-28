@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from src.apis.domains.chat.schemas import ChatRequest
-from src.apis.domains.chat.service import resolve_top_k
+from src.apis.domains.chat.schemas import AuthenticatedChatRequest, ChatRequest
+from src.apis.domains.chat.service import handle_chat, resolve_top_k
+from src.core_ai.personalization.models import PersonalizationUpdate
 from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
 from src.core_ai.nextrip_agent.constants import (
     supports_structured_conversation_context,
 )
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
+from src.infra.user_profile_store import InMemoryUserProfileStore
 
 
 class FakeKbClient:
@@ -245,6 +247,22 @@ def test_answer_generator_omits_redundant_location_when_address_exists() -> None
     assert predicates == ["address", "phone"]
 
 
+def test_answer_generator_omits_coordinates_when_city_answers_address_query() -> None:
+    facts = facts_for_answer(
+        [
+            {
+                "subject_id": "v8:attr_qn_001",
+                "predicate": "location",
+                "value": '{"lat":13.88,"lng":109.29}',
+            }
+        ],
+        evidence=[{"place_id": "v8:attr_qn_001", "city": "Quy Nhơn"}],
+        query_plan={"requested_fields": ["address", "location"]},
+    )
+
+    assert facts == []
+
+
 def test_answer_agent_falls_back_when_llm_fails() -> None:
     result = run_nextrip_agent(
         message="Bãi biển Mỹ Khê ở đâu?",
@@ -285,6 +303,48 @@ def test_v8_itinerary_context_and_warnings_survive_the_agent_boundary() -> None:
     assert result.itinerary[0]["slots"][0]["place_id"] == "attr_qn_001"
     assert result.warnings == ["itinerary_preferences_relaxed"]
     assert result.conversation_context["turn_count"] == 2
+
+
+def test_user_profile_reaches_v8_as_structured_personalization_context() -> None:
+    client = FakeV8ItineraryClient()
+    profiles = InMemoryUserProfileStore()
+    profiles.update_profile(
+        "alice",
+        PersonalizationUpdate(
+            budget_level="budget",
+            travel_pace="relaxed",
+            party_type="family",
+            preferred_concepts=["beach", "local_food"],
+            excluded_concepts=["nightclub"],
+        ),
+    )
+
+    handle_chat(
+        AuthenticatedChatRequest(
+            message="Lên lịch trình một ngày ở Quy Nhơn",
+            session_id="personalized-v8",
+            user_id="alice",
+            kb_version="v8",
+        ),
+        client,
+        FakeAnswerGenerator(),
+        user_profile_store=profiles,
+    )
+
+    assert client.context is not None
+    assert client.context["personalization"] == {
+        "profile_revision": 1,
+        "budget_level": "budget",
+        "travel_pace": "relaxed",
+        "party_type": "family",
+        "hard_constraints": {},
+        "preferred_concepts": ["beach", "local_food"],
+        "excluded_concepts": ["nightclub"],
+        "preferred_cities": [],
+        "dietary_requirements": [],
+        "accessibility_requirements": [],
+        "transport_preferences": [],
+    }
 
 
 def test_v8_keeps_named_query_verbatim_instead_of_appending_context_city() -> None:

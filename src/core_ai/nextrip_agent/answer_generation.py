@@ -16,7 +16,12 @@ def fact_value_text(value: object) -> str:
     return str(value)
 
 
-def facts_for_answer(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def facts_for_answer(
+    facts: list[dict[str, Any]],
+    *,
+    evidence: list[dict[str, Any]] | None = None,
+    query_plan: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Project factual payloads for prose while preserving the API response facts."""
     selected = list(facts)
     for predicates in _REDUNDANT_FACT_GROUPS:
@@ -32,6 +37,24 @@ def facts_for_answer(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not (
                 fact.get("predicate") in redundant
                 and str(fact.get("subject_id")) in subjects_with_preferred
+            )
+        ]
+    requested_fields = set((query_plan or {}).get("requested_fields") or [])
+    coordinates_explicitly_requested = (
+        "location" in requested_fields and "address" not in requested_fields
+    )
+    if not coordinates_explicitly_requested:
+        subjects_with_city = {
+            str(item.get("place_id"))
+            for item in evidence or []
+            if item.get("place_id") and item.get("city")
+        }
+        selected = [
+            fact
+            for fact in selected
+            if not (
+                fact.get("predicate") == "location"
+                and str(fact.get("subject_id")) in subjects_with_city
             )
         ]
     return selected

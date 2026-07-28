@@ -265,6 +265,7 @@ class GeminiAnswerGenerator:
         weather: list[dict[str, Any]],
         latitude: float | None,
         longitude: float | None,
+        personalization_context: dict[str, Any] | None = None,
     ) -> ItineraryPlan:
         prompt = {
             "question": question,
@@ -277,6 +278,7 @@ class GeminiAnswerGenerator:
                 else None
             ),
             "weather": weather,
+            "personalization": personalization_context or {},
             "candidates": [_planning_candidate(item) for item in candidates],
         }
         with span("gemini.plan_itinerary", model=self._planning_model):
@@ -598,6 +600,15 @@ def _restore_references(answer: str, replacements: dict[str, str]) -> str:
         raise RuntimeError(f"Gemini violated grounded reference contract: {missing}")
     for reference, value in replacements.items():
         answer = answer.replace(reference, value)
+    for value in set(replacements.values()):
+        if not value.strip():
+            continue
+        answer = re.sub(
+            rf"(?<!\w){re.escape(value)}(?:\s+{re.escape(value)})+(?!\w)",
+            value,
+            answer,
+            flags=re.IGNORECASE,
+        )
     unresolved = re.findall(r"\[\[[A-Z][A-Z0-9_]*\]\]", answer)
     if unresolved:
         raise RuntimeError(f"Gemini emitted unknown grounded references: {unresolved}")

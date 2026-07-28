@@ -307,6 +307,9 @@ class TravelOrchestrator:
                 city=effective_city,
                 latitude=latitude,
                 longitude=longitude,
+                personalization_context=dict(
+                    (conversation_context or {}).get("personalization") or {}
+                ),
             )
 
         return OrchestratedResult(

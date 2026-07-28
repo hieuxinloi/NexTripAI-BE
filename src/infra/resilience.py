@@ -41,6 +41,10 @@ class TtlCache(Generic[T]):
         with self._lock:
             self._items[key] = _CacheEntry(value, monotonic() + ttl_seconds)
 
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+
 
 class CircuitBreaker:
     def __init__(self, failure_threshold: int, recovery_seconds: float) -> None:

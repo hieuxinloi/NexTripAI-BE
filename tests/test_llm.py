@@ -46,6 +46,18 @@ def test_grounded_context_protects_entity_names_and_fact_values() -> None:
     ) == "Hải sản tươi sống Mr. Mộc ở Quy Nhơn có địa chỉ 56 Nguyễn Thị Định."
 
 
+def test_reference_restoration_removes_adjacent_grounded_name_duplicates() -> None:
+    answer = _restore_references(
+        "[[PLACE_1]] thuộc [[CITY_1]] Quy Nhơn.",
+        {
+            "[[PLACE_1]]": "Eo Gió",
+            "[[CITY_1]]": "Quy Nhơn",
+        },
+    )
+
+    assert answer == "Eo Gió thuộc Quy Nhơn."
+
+
 def test_grounded_context_masks_place_name_in_question() -> None:
     context, _ = _protected_context(
         question="Khách sạn An House địa chỉ ở đâu?",

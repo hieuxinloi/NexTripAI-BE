@@ -11,6 +11,7 @@ from src.core_ai.nextrip_agent.weather import WeatherAssessment
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
+    display_message: str | None = Field(default=None, min_length=1, max_length=4000)
     session_id: str = Field(..., min_length=1, max_length=128)
     city: str | None = Field(default=None, max_length=80)
     entity_types: list[str] | None = None

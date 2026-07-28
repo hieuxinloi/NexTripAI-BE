@@ -15,6 +15,11 @@ class Principal:
     claims: dict[str, object]
     auth_mode: str
 
+    @property
+    def role(self) -> str:
+        role = str(self.claims.get("role") or "user").strip().lower()
+        return role if role in {"user", "support", "admin"} else "user"
+
 
 class Authenticator:
     def __init__(self, app_settings: Settings) -> None:
@@ -32,17 +37,30 @@ class Authenticator:
             try:
                 firebase_admin.get_app()
             except ValueError:
+                credential = None
+                if app_settings.firestore_credentials_path:
+                    from firebase_admin import credentials
+
+                    credential = credentials.Certificate(
+                        app_settings.firestore_credentials_path
+                    )
                 firebase_admin.initialize_app(
+                    credential,
                     options={"projectId": app_settings.firebase_project_id}
                     if app_settings.firebase_project_id
-                    else None
+                    else None,
                 )
             self._firebase_auth = auth
 
     async def authenticate(self, request: Request) -> Principal:
         if self._settings.auth_mode == "disabled":
             uid = request.headers.get("X-Dev-User-ID", "local-user").strip()
-            return Principal(uid=uid[:128] or "local-user", claims={}, auth_mode="disabled")
+            role = request.headers.get("X-Dev-Role", "user").strip().lower()
+            return Principal(
+                uid=uid[:128] or "local-user",
+                claims={"role": role},
+                auth_mode="disabled",
+            )
 
         credentials: HTTPAuthorizationCredentials | None = await self._bearer(request)
         if credentials is None or credentials.scheme.lower() != "bearer":

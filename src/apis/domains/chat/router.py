@@ -111,12 +111,21 @@ def select_kb_version(
         ]))
     preferred = candidates[0]
     try:
-        ready_versions = kb_client.ready_versions()
+        try:
+            readiness = kb_client.readiness()
+        except AttributeError:
+            readiness = {"ready_versions": list(kb_client.ready_versions())}
+        ready_versions = {
+            str(version) for version in readiness.get("ready_versions") or []
+        }
     except Exception as exc:
         logger.warning("KB readiness lookup failed error_type={}", exc.__class__.__name__)
         if app_settings.environment == "production":
             raise HTTPException(status_code=503, detail="Knowledge Base is not ready.") from exc
         return preferred
+    active_version = str(readiness.get("active_version") or "")
+    if not use_client_version and active_version in ready_versions:
+        return active_version
     for version in candidates:
         if version in ready_versions:
             return version

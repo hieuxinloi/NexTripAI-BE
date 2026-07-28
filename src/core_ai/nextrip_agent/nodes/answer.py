@@ -108,7 +108,11 @@ def answer_node(
                 question=state["message"],
                 answer_type=state.get("answer_type") or "kb_retrieval",
                 evidence=evidence,
-                facts=facts_for_answer(facts),
+                facts=facts_for_answer(
+                    facts,
+                    evidence=evidence,
+                    query_plan=state.get("query_plan") or {},
+                ),
                 matched_paths=list(state.get("matched_paths") or []),
             )
             generation_mode = "llm_grounded"

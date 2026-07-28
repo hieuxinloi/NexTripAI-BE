@@ -23,6 +23,7 @@ class KbClient:
         retry_attempts: int = 2,
         circuit_failure_threshold: int = 5,
         circuit_recovery_seconds: float = 30.0,
+        admin_api_key: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self._client = client if client is not None else httpx.Client(
@@ -33,6 +34,7 @@ class KbClient:
         self._timeout = timeout_seconds
         self._auth_mode = auth_mode
         self._auth_audience = auth_audience or self.base_url
+        self._admin_api_key = admin_api_key
         self._retry_attempts = retry_attempts
         self._circuit = CircuitBreaker(
             circuit_failure_threshold,
@@ -96,6 +98,40 @@ class KbClient:
             "/api/kb/query",
             payload,
         )
+
+    def admin_deployments(self) -> dict[str, Any]:
+        return self._admin_request("GET", "/api/kb/admin/deployments")
+
+    def admin_validate_deployment(self, version: str) -> dict[str, Any]:
+        return self._admin_request(
+            "POST",
+            f"/api/kb/admin/deployments/{version}/validate",
+        )
+
+    def admin_activate_deployment(self, version: str) -> dict[str, Any]:
+        return self._admin_request(
+            "POST",
+            f"/api/kb/admin/deployments/{version}/activate",
+        )
+
+    def admin_rollback_deployment(self) -> dict[str, Any]:
+        return self._admin_request("POST", "/api/kb/admin/deployments/rollback")
+
+    def _admin_request(self, method: str, path: str) -> dict[str, Any]:
+        if not self._admin_api_key:
+            raise RuntimeError("KB administration is not configured.")
+        response = self._client.request(
+            method,
+            f"{self.base_url}{path}",
+            headers={
+                **self._headers(),
+                "X-KB-Admin-Key": self._admin_api_key,
+            },
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        self._health_cache.clear()
+        return response.json()
 
     def readiness(self, *, force: bool = False) -> dict[str, Any]:
         if not force:

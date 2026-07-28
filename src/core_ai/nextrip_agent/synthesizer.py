@@ -69,7 +69,11 @@ def synthesize_answer(
                     question=question,
                     answer_type=graph.answer_type,
                     evidence=graph.evidence,
-                    facts=facts_for_answer(graph.facts),
+                    facts=facts_for_answer(
+                        graph.facts,
+                        evidence=graph.evidence,
+                        query_plan=graph.query_plan,
+                    ),
                     matched_paths=graph.matched_paths,
                     weather=weather.model_dump(mode="json") if weather else None,
                     conversation_context=conversation_context,
@@ -90,7 +94,11 @@ def synthesize_answer(
                     question=question,
                     answer_type=graph.answer_type,
                     evidence=graph.evidence,
-                    facts=facts_for_answer(graph.facts),
+                    facts=facts_for_answer(
+                        graph.facts,
+                        evidence=graph.evidence,
+                        query_plan=graph.query_plan,
+                    ),
                     matched_paths=graph.matched_paths,
                     conversation_context=conversation_context,
                 )

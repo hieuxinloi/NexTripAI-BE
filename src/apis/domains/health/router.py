@@ -45,8 +45,11 @@ async def kb_versions(request: Request) -> dict[str, object]:
             "versions": [],
             "error": exc.__class__.__name__,
         }
+    dependency_default = dependency.get("active_version")
     default_version = (
-        app_settings.active_kb_version
+        dependency_default
+        if dependency_default in ready_versions
+        else app_settings.active_kb_version
         if app_settings.active_kb_version in ready_versions
         else next(iter(ready_versions), None)
     )
@@ -60,6 +63,7 @@ async def kb_versions(request: Request) -> dict[str, object]:
             }
             for version in ready_versions
         ],
+        "previous_version": dependency.get("previous_version"),
     }
 
 
@@ -73,11 +77,16 @@ async def ready(request: Request, response: Response) -> dict[str, object]:
             abandon_on_cancel=True,
         )
         ready_versions = set(dependency.get("ready_versions") or [])
+        active_dependency_version = dependency.get("active_version")
         candidates = [
+            active_dependency_version,
             app_settings.active_kb_version,
             *app_settings.kb_fallback_version_list,
         ]
-        selected = next((item for item in candidates if item in ready_versions), None)
+        selected = next(
+            (item for item in candidates if item and item in ready_versions),
+            None,
+        )
     except Exception as exc:
         dependency = {"status": "not_ready", "error": exc.__class__.__name__}
         selected = None

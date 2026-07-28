@@ -13,6 +13,7 @@ from src.apis.routers import include_api_routers
 from src.config import settings
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import create_chat_store
+from src.infra.user_profile_store import create_user_profile_store
 from src.infra.weather import OpenMeteoWeatherClient
 from src.infra.llm import (
     create_answer_generator,
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
         retry_attempts=app_settings.resilience_retry_attempts,
         circuit_failure_threshold=app_settings.circuit_breaker_failure_threshold,
         circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
+        admin_api_key=app_settings.kb_admin_api_key,
     )
     answer_generator = create_answer_generator(app_settings)
     conversation_contextualizer = create_conversation_contextualizer(app_settings)
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
         circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
     )
     chat_store = create_chat_store(app_settings)
+    user_profile_store = create_user_profile_store(app_settings)
     chat_worker_pool = ChatWorkerPool(
         worker_count=app_settings.ai_worker_count,
         queue_capacity=app_settings.ai_queue_capacity,
@@ -56,6 +59,7 @@ async def lifespan(app: FastAPI):
         chat_store=chat_store,
         chat_history_limit=app_settings.chat_history_limit,
         conversation_contextualizer=conversation_contextualizer,
+        user_profile_store=user_profile_store,
     )
     evaluation_manager = EvaluationManager(
         worker_pool=chat_worker_pool,
@@ -72,6 +76,7 @@ async def lifespan(app: FastAPI):
     app.state.evaluation_manager = evaluation_manager
     app.state.weather_client = weather_client
     app.state.chat_store = chat_store
+    app.state.user_profile_store = user_profile_store
     app.state.settings = app_settings
     app.state.authenticator = Authenticator(app_settings)
     app.state.rate_limiter = InMemoryRateLimiter(
@@ -92,6 +97,7 @@ async def lifespan(app: FastAPI):
             conversation_contextualizer.close()
         weather_client.close()
         chat_store.close()
+        user_profile_store.close()
 
 
 def create_app() -> FastAPI:

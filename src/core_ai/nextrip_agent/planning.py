@@ -71,6 +71,7 @@ class SupportsItineraryPlanning(Protocol):
         weather: list[dict[str, Any]],
         latitude: float | None,
         longitude: float | None,
+        personalization_context: dict[str, Any] | None = None,
     ) -> ItineraryPlan: ...
 
 
@@ -99,6 +100,7 @@ def planning_agent_node(
     city: str | None,
     latitude: float | None,
     longitude: float | None,
+    personalization_context: dict[str, Any] | None = None,
 ) -> tuple[AgentResult, dict[str, Any]]:
     if not is_itinerary_request(message, graph.query_plan):
         return graph, {"node": "planning", "status": "skipped"}
@@ -144,6 +146,7 @@ def planning_agent_node(
                 weather=[item.model_dump(mode="json") for item in weather_forecast],
                 latitude=latitude,
                 longitude=longitude,
+                personalization_context=personalization_context,
             )
             _validate_plan(
                 proposed,
@@ -208,6 +211,7 @@ def planning_agent_node(
         "duration_nights": duration_nights,
         "candidate_count": len(candidates),
         "itinerary_days": len(itinerary),
+        "personalized": bool(personalization_context),
     }
 
 

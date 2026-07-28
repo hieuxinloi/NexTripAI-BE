@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from src.apis.domains.chat.schemas import ChatRequest
-from src.apis.domains.chat.service import _kb_conversation_context, handle_chat
+from src.apis.domains.chat.service import (
+    KnowledgeBaseUnavailableError,
+    _kb_conversation_context,
+    handle_chat,
+)
 from src.core_ai.nextrip_agent.conversation import (
     ConversationContext,
     ConversationResolution,
@@ -234,6 +240,27 @@ def test_weather_without_location_returns_clarification() -> None:
         "all",
     ]
     assert any(event.get("status") == "needs_input" for event in response.trace)
+
+
+def test_chat_persists_clarification_label_instead_of_internal_query() -> None:
+    store = InMemoryChatStore()
+
+    with pytest.raises(KnowledgeBaseUnavailableError):
+        handle_chat(
+            ChatRequest(
+                message="Tìm quán cà phê ngon",
+                display_message="Quy Nhơn",
+                session_id="clarification-display",
+                city="Quy Nhơn",
+                kb_version="v3",
+            ),
+            FailingKbClient(),
+            weather_client=FakeWeatherClient(),
+            chat_store=store,
+        )
+
+    messages = store.recent_messages("clarification-display", 10)
+    assert messages[0]["content"] == "Quy Nhơn"
 
 
 def test_food_follow_up_expands_recent_dishes_from_assistant_metadata() -> None:

@@ -43,14 +43,17 @@ class Settings(BaseSettings):
     firestore_credentials_path: str | None = None
     firestore_database: str = "(default)"
     firestore_sessions_collection: str = "chat_sessions"
+    firestore_users_collection: str = "users"
+    firestore_audit_collection: str = "admin_audit_logs"
     chat_history_limit: int = Field(default=8, ge=1, le=50)
     auth_mode: Literal["disabled", "firebase"] = "disabled"
     firebase_project_id: str | None = None
     kb_auth_mode: Literal["none", "google_oidc"] = "none"
     kb_auth_audience: str | None = None
+    kb_admin_api_key: str | None = None
     active_kb_version: str = Field(default="v8", pattern=r"^v[1-9][0-9]*$")
     kb_fallback_versions: str = ""
-    allow_client_kb_version: bool = True
+    allow_client_kb_version: bool = False
     kb_request_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
     chat_request_timeout_seconds: float = Field(default=45.0, gt=1, le=120)
     rate_limit_requests: int = Field(default=30, ge=1, le=10_000)

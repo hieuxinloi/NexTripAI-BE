@@ -336,6 +336,7 @@ class FirestoreChatStore:
         self._check_owner(session_id, user_id)
         session_snapshot = session.get()
         existing = session_snapshot.to_dict() if session_snapshot.exists else {}
+        message_count = int(existing.get("message_count") or 0) + 1
         session.set(
             {
                 "user_id": user_id,
@@ -345,6 +346,7 @@ class FirestoreChatStore:
                     or (content.strip().replace("\n", " ")[:120] if role == "user" else "Cuộc trò chuyện mới")
                 ),
                 "updated_at": self._firestore.SERVER_TIMESTAMP,
+                "message_count": message_count,
             },
             merge=True,
         )
@@ -375,6 +377,7 @@ class FirestoreChatStore:
                     "title": title or "Cuộc trò chuyện mới",
                     "created_at": self._firestore.SERVER_TIMESTAMP,
                     "updated_at": self._firestore.SERVER_TIMESTAMP,
+                    "message_count": 0,
                 },
                 merge=True,
             )
@@ -392,7 +395,7 @@ class FirestoreChatStore:
             item = document.to_dict() or {}
             if user_id is not None and item.get("user_id") not in {None, user_id}:
                 continue
-            message_count = len(list(document.reference.collection("messages").limit(200).stream()))
+            message_count = int(item.get("message_count") or 0)
             rows.append({
                 "session_id": document.id,
                 "title": item.get("title") or "Cuộc trò chuyện mới",
@@ -448,9 +451,7 @@ class FirestoreChatStore:
             "title": title,
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
-            "message_count": len(
-                list(session.collection("messages").limit(200).stream())
-            ),
+            "message_count": int(data.get("message_count") or 0),
         }
 
     def delete_session(self, session_id: str, *, user_id: str) -> bool:

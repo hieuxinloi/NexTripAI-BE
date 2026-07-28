@@ -28,8 +28,10 @@ from src.core_ai.nextrip_agent.conversation import (
 )
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
+from src.core_ai.personalization.service import compile_personalization_context
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
+from src.infra.user_profile_store import UserProfileStore
 from src.infra.weather import OpenMeteoWeatherClient
 
 DEFAULT_TOP_K = 5
@@ -124,6 +126,7 @@ def handle_chat(
     chat_store: ChatStore | None = None,
     chat_history_limit: int = 8,
     conversation_contextualizer: SupportsConversationContextualization | None = None,
+    user_profile_store: UserProfileStore | None = None,
 ) -> ChatResponse:
     started_at = perf_counter()
     user_id = getattr(request, "user_id", None)
@@ -141,6 +144,18 @@ def handle_chat(
         request.session_id,
         user_id=user_id,
     )
+    personalization = {}
+    if user_profile_store is not None and user_id:
+        try:
+            personalization = compile_personalization_context(
+                user_profile_store.get_profile(user_id)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Personalization load failed user_id={} error_type={}",
+                user_id,
+                exc.__class__.__name__,
+            )
     context = resolve_conversation_context(
         message=request.message,
         explicit_city=request.city,
@@ -166,6 +181,7 @@ def handle_chat(
             session_memory=session_memory,
             context=context,
             resolved_turn=resolved_turn,
+            personalization=personalization,
         )
     else:
         graph_message = resolved_turn.resolution.standalone_message
@@ -175,7 +191,7 @@ def handle_chat(
         request,
         user_message_id,
         "user",
-        request.message,
+        request.display_message or request.message,
         city=context.city,
         metadata={
             "context_city_source": context.city_source,
@@ -257,6 +273,12 @@ def handle_chat(
     if agent_result.error and weather is None:
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
+    answer_context = answer_memory_context(
+        history=history,
+        resolved_turn=resolved_turn,
+    ) or {}
+    if personalization:
+        answer_context["personalization"] = personalization
     synthesis = synthesize_answer(
         question=request.message,
         kb_version=request.kb_version,
@@ -266,10 +288,7 @@ def handle_chat(
         weather_requested=orchestration.plan.run_weather,
         weather_trace=orchestration.weather_trace,
         answer_generator=answer_generator,
-        conversation_context=answer_memory_context(
-            history=history,
-            resolved_turn=resolved_turn,
-        ),
+        conversation_context=answer_context or None,
     )
     answer = synthesis.answer
     trace = [
@@ -446,6 +465,7 @@ def _kb_conversation_context(
     session_memory: dict,
     context: ConversationContext,
     resolved_turn: ResolvedTurn,
+    personalization: dict | None = None,
 ) -> dict | None:
     stored = session_memory.get("kb_context")
     payload = dict(stored) if isinstance(stored, dict) else {}
@@ -457,6 +477,10 @@ def _kb_conversation_context(
     standalone = resolved_turn.resolution.standalone_message.strip()
     if standalone and standalone != resolved_turn.original_message.strip():
         payload["resolved_query"] = standalone
+    if personalization:
+        payload["personalization"] = personalization
+    else:
+        payload.pop("personalization", None)
     return payload or None
 
 
