@@ -29,6 +29,7 @@ from src.core_ai.nextrip_agent.conversation import (
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
 from src.core_ai.personalization.service import compile_personalization_context
+from src.core_ai.personalization.models import PreferenceEvent
 from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
 from src.infra.user_profile_store import UserProfileStore
@@ -145,11 +146,12 @@ def handle_chat(
         user_id=user_id,
     )
     personalization = {}
+    personalization_enabled = False
     if user_profile_store is not None and user_id:
         try:
-            personalization = compile_personalization_context(
-                user_profile_store.get_profile(user_id)
-            )
+            profile = user_profile_store.get_profile(user_id)
+            personalization_enabled = profile.personalization_enabled
+            personalization = compile_personalization_context(profile)
         except Exception as exc:
             logger.warning(
                 "Personalization load failed user_id={} error_type={}",
@@ -366,6 +368,14 @@ def handle_chat(
         kb_context=agent_result.conversation_context,
         user_id=user_id,
     )
+    _record_grounded_place_interest(
+        user_profile_store,
+        user_id=user_id,
+        session_id=request.session_id,
+        answer_type=str(agent_result.answer_type),
+        evidence=evidence,
+        personalization_enabled=personalization_enabled,
+    )
     return response
 
 
@@ -512,3 +522,39 @@ def _save_session_memory(
             session_id,
             exc.__class__.__name__,
         )
+
+
+def _record_grounded_place_interest(
+    store: UserProfileStore | None,
+    *,
+    user_id: str | None,
+    session_id: str,
+    answer_type: str,
+    evidence: list[EvidenceItem],
+    personalization_enabled: bool,
+) -> None:
+    if (
+        store is None
+        or not user_id
+        or not personalization_enabled
+        or answer_type != "entity_detail"
+    ):
+        return
+    for item in evidence[:3]:
+        try:
+            store.save_event(
+                user_id,
+                PreferenceEvent(
+                    event_id=uuid4().hex,
+                    event_type="ask_place",
+                    place_id=item.place_id,
+                    session_id=session_id,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Preference event save failed user_id={} place_id={} error_type={}",
+                user_id,
+                item.place_id,
+                exc.__class__.__name__,
+            )

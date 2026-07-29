@@ -88,12 +88,46 @@ class PreferenceEvent(BaseModel):
         "add_to_itinerary",
         "remove_from_itinerary",
         "open_source",
+        "ask_place",
+        "view_detail",
+        "dismiss_recommendation",
     ]
     place_id: str = Field(min_length=1, max_length=256)
     session_id: str | None = Field(default=None, max_length=128)
 
 
+class PreferenceEventRecord(PreferenceEvent):
+    created_at: datetime | None = None
+
+
+class RecommendationItem(BaseModel):
+    place_id: str
+    name: str
+    city: str
+    entity_type: str
+    category: str | None = None
+    score: float = Field(default=0, ge=0)
+    reason_code: Literal[
+        "similar_to_recent_place",
+        "matches_preference",
+        "preferred_city",
+        "popular",
+    ] = "popular"
+    reason: str
+    saved: bool = False
+    attributes: dict[str, object] = Field(default_factory=dict)
+
+
+class RecommendationFeed(BaseModel):
+    items: list[RecommendationItem] = Field(default_factory=list)
+    personalized: bool = False
+    source: Literal["personalized", "popular", "disabled"] = "popular"
+
+
+class SavedPlacesResponse(BaseModel):
+    items: list[RecommendationItem] = Field(default_factory=list)
+
+
 class UserAdminUpdate(BaseModel):
     status: UserStatus | None = None
     role: Literal["user", "support", "admin"] | None = None
-

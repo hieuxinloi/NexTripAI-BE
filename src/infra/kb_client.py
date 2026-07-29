@@ -9,6 +9,7 @@ from loguru import logger
 from src.shared.logging import safe_text
 from src.shared.request_context import current_request_id
 from src.infra.resilience import CircuitBreaker, TtlCache, retry
+from src.core_ai.personalization.models import SavedPlacesResponse
 
 
 class KbClient:
@@ -98,6 +99,43 @@ class KbClient:
             "/api/kb/query",
             payload,
         )
+
+    def personalized_recommendations(
+        self,
+        *,
+        seed_place_ids: list[str],
+        preferred_concepts: list[str],
+        excluded_concepts: list[str],
+        excluded_place_ids: list[str],
+        preferred_cities: list[str],
+        limit: int,
+        kb_version: str = "v8",
+    ) -> SavedPlacesResponse:
+        payload = self._post(
+            "/api/kb/recommendations",
+            {
+                "kb_version": kb_version,
+                "seed_place_ids": seed_place_ids,
+                "preferred_concepts": preferred_concepts,
+                "excluded_concepts": excluded_concepts,
+                "excluded_place_ids": excluded_place_ids,
+                "preferred_cities": preferred_cities,
+                "limit": limit,
+            },
+        )
+        return SavedPlacesResponse.model_validate(payload)
+
+    def places_by_ids(
+        self,
+        place_ids: list[str],
+        *,
+        kb_version: str = "v8",
+    ) -> SavedPlacesResponse:
+        payload = self._post(
+            "/api/kb/places/batch",
+            {"kb_version": kb_version, "place_ids": place_ids},
+        )
+        return SavedPlacesResponse.model_validate(payload)
 
     def admin_deployments(self) -> dict[str, Any]:
         return self._admin_request("GET", "/api/kb/admin/deployments")
@@ -195,7 +233,7 @@ class KbClient:
             path,
             response.status_code,
             data.get("strategy") or data.get("kb_version") or "-",
-            len(data.get("results") or data.get("entities") or data.get("recommendations") or []),
+            _payload_result_count(data),
             int((perf_counter() - started_at) * 1000),
         )
         return data
@@ -234,3 +272,11 @@ def _is_retryable(exc: Exception) -> bool:
         503,
         504,
     }
+
+
+def _payload_result_count(payload: dict[str, Any]) -> int:
+    for field in ("results", "entities", "recommendations", "items"):
+        value = payload.get(field)
+        if isinstance(value, list):
+            return len(value)
+    return 0

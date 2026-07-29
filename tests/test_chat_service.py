@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from src.apis.domains.chat.schemas import AuthenticatedChatRequest, ChatRequest
-from src.apis.domains.chat.service import handle_chat, resolve_top_k
+from src.apis.domains.chat.schemas import (
+    AuthenticatedChatRequest,
+    ChatRequest,
+    EvidenceItem,
+)
+from src.apis.domains.chat.service import (
+    _record_grounded_place_interest,
+    handle_chat,
+    resolve_top_k,
+)
 from src.core_ai.personalization.models import PersonalizationUpdate
 from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
 from src.core_ai.nextrip_agent.constants import (
@@ -314,7 +322,7 @@ def test_user_profile_reaches_v8_as_structured_personalization_context() -> None
             budget_level="budget",
             travel_pace="relaxed",
             party_type="family",
-            preferred_concepts=["beach", "local_food"],
+            preferred_concepts=["beach", "vietnamese"],
             excluded_concepts=["nightclub"],
         ),
     )
@@ -338,13 +346,28 @@ def test_user_profile_reaches_v8_as_structured_personalization_context() -> None
         "travel_pace": "relaxed",
         "party_type": "family",
         "hard_constraints": {},
-        "preferred_concepts": ["beach", "local_food"],
+        "preferred_concepts": ["beach", "vietnamese"],
         "excluded_concepts": ["nightclub"],
         "preferred_cities": [],
         "dietary_requirements": [],
         "accessibility_requirements": [],
         "transport_preferences": [],
     }
+
+
+def test_disabled_personalization_does_not_record_implicit_place_interest() -> None:
+    profiles = InMemoryUserProfileStore()
+
+    _record_grounded_place_interest(
+        profiles,
+        user_id="alice",
+        session_id="private-session",
+        answer_type="entity_detail",
+        evidence=[EvidenceItem(place_id="v8:place-1")],
+        personalization_enabled=False,
+    )
+
+    assert profiles.recent_events("alice") == []
 
 
 def test_v8_keeps_named_query_verbatim_instead_of_appending_context_city() -> None:

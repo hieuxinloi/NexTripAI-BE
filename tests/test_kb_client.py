@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.infra.kb_client import KbClient
+from src.infra.kb_client import KbClient, _payload_result_count
 
 
 def test_kb_client_reuses_injected_connection_pool() -> None:
@@ -42,6 +42,11 @@ def test_kb_client_calls_v2_query_contract() -> None:
     assert captured["path"] == "/api/kb/query"
     assert '"kb_version":"v2"' in captured["body"]
     client.close()
+
+
+def test_payload_result_count_supports_recommendation_items() -> None:
+    assert _payload_result_count({"items": [{"place_id": "one"}]}) == 1
+    assert _payload_result_count({"items": []}) == 0
 
 
 def test_kb_client_calls_v3_query_contract() -> None:

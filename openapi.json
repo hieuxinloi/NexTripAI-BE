@@ -623,6 +623,27 @@
         }
       }
     },
+    "/api/me": {
+      "get": {
+        "tags": [
+          "personalization"
+        ],
+        "summary": "Get Session Identity",
+        "operationId": "get_session_identity_api_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionIdentity"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/me/preferences": {
       "get": {
         "tags": [
@@ -740,6 +761,102 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/recommendations": {
+      "get": {
+        "tags": [
+          "personalization"
+        ],
+        "summary": "Get Recommendations",
+        "operationId": "get_recommendations_api_me_recommendations_get",
+        "parameters": [
+          {
+            "name": "city",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "City"
+            }
+          },
+          {
+            "name": "seed_place_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20,
+              "title": "Seed Place Ids"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": 1,
+              "default": 6,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendationFeed"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/saved-places": {
+      "get": {
+        "tags": [
+          "personalization"
+        ],
+        "summary": "Get Saved Places",
+        "operationId": "get_saved_places_api_me_saved_places_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedPlacesResponse"
                 }
               }
             }
@@ -2410,7 +2527,10 @@
               "unsave",
               "add_to_itinerary",
               "remove_from_itinerary",
-              "open_source"
+              "open_source",
+              "ask_place",
+              "view_detail",
+              "dismiss_recommendation"
             ],
             "title": "Event Type"
           },
@@ -2440,6 +2560,118 @@
           "place_id"
         ],
         "title": "PreferenceEvent"
+      },
+      "RecommendationFeed": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "personalized": {
+            "type": "boolean",
+            "title": "Personalized",
+            "default": false
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "personalized",
+              "popular",
+              "disabled"
+            ],
+            "title": "Source",
+            "default": "popular"
+          }
+        },
+        "type": "object",
+        "title": "RecommendationFeed"
+      },
+      "RecommendationItem": {
+        "properties": {
+          "place_id": {
+            "type": "string",
+            "title": "Place Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "city": {
+            "type": "string",
+            "title": "City"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Score",
+            "default": 0
+          },
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "similar_to_recent_place",
+              "matches_preference",
+              "preferred_city",
+              "popular"
+            ],
+            "title": "Reason Code",
+            "default": "popular"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "saved": {
+            "type": "boolean",
+            "title": "Saved",
+            "default": false
+          },
+          "attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "place_id",
+          "name",
+          "city",
+          "entity_type",
+          "reason"
+        ],
+        "title": "RecommendationItem"
+      },
+      "SavedPlacesResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "SavedPlacesResponse"
       },
       "SessionCreateRequest": {
         "properties": {
@@ -2499,6 +2731,34 @@
           "title"
         ],
         "title": "SessionCreateResponse"
+      },
+      "SessionIdentity": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "auth_mode": {
+            "type": "string",
+            "title": "Auth Mode"
+          },
+          "is_anonymous": {
+            "type": "boolean",
+            "title": "Is Anonymous"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "role",
+          "auth_mode",
+          "is_anonymous"
+        ],
+        "title": "SessionIdentity"
       },
       "SessionListResponse": {
         "properties": {

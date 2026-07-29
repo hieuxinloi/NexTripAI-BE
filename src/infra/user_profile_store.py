@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 from threading import Lock
 from typing import Any, Protocol
 
@@ -9,11 +10,17 @@ from src.core_ai.personalization.models import (
     PersonalizationProfile,
     PersonalizationUpdate,
     PreferenceEvent,
+    PreferenceEventRecord,
 )
 
 
 class ProfileRevisionConflictError(RuntimeError):
     pass
+
+
+def _firestore_document_id(value: str) -> str:
+    """Return a stable Firestore-safe key while keeping the original ID in data."""
+    return sha256(value.encode("utf-8")).hexdigest()
 
 
 class UserProfileStore(Protocol):
@@ -25,6 +32,12 @@ class UserProfileStore(Protocol):
     ) -> PersonalizationProfile: ...
     def reset_profile(self, user_id: str) -> PersonalizationProfile: ...
     def save_event(self, user_id: str, event: PreferenceEvent) -> None: ...
+    def recent_events(
+        self, user_id: str, limit: int = 100
+    ) -> list[PreferenceEventRecord]: ...
+    def saved_place_ids(
+        self, user_id: str, limit: int | None = None
+    ) -> list[str]: ...
     def list_users(self, limit: int = 100) -> list[dict[str, Any]]: ...
     def update_admin_metadata(
         self,
@@ -51,7 +64,8 @@ class InMemoryUserProfileStore:
     def __init__(self) -> None:
         self._profiles: dict[str, PersonalizationProfile] = {}
         self._roles: dict[str, str] = {}
-        self._events: dict[tuple[str, str], PreferenceEvent] = {}
+        self._events: dict[tuple[str, str], PreferenceEventRecord] = {}
+        self._saved_places: dict[str, dict[str, datetime]] = {}
         self._audit: list[dict[str, Any]] = []
         self._lock = Lock()
 
@@ -111,7 +125,53 @@ class InMemoryUserProfileStore:
 
     def save_event(self, user_id: str, event: PreferenceEvent) -> None:
         with self._lock:
-            self._events.setdefault((user_id, event.event_id), event)
+            key = (user_id, event.event_id)
+            if key in self._events:
+                return
+            self._events[key] = PreferenceEventRecord(
+                **event.model_dump(),
+                created_at=datetime.now(timezone.utc),
+            )
+            if event.event_type == "save":
+                self._saved_places.setdefault(user_id, {})[event.place_id] = (
+                    datetime.now(timezone.utc)
+                )
+            elif event.event_type == "unsave":
+                self._saved_places.setdefault(user_id, {}).pop(event.place_id, None)
+
+    def recent_events(
+        self,
+        user_id: str,
+        limit: int = 100,
+    ) -> list[PreferenceEventRecord]:
+        with self._lock:
+            events = [
+                event.model_copy(deep=True)
+                for (owner_id, _), event in self._events.items()
+                if owner_id == user_id
+            ]
+        return sorted(
+            events,
+            key=lambda event: event.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )[:limit]
+
+    def saved_place_ids(
+        self,
+        user_id: str,
+        limit: int | None = None,
+    ) -> list[str]:
+        with self._lock:
+            saved = self._saved_places.get(user_id, {})
+            place_ids = [
+                place_id
+                for place_id, _ in sorted(
+                    saved.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+            ]
+        return place_ids[:limit] if limit is not None else place_ids
 
     def list_users(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -298,15 +358,71 @@ class FirestoreUserProfileStore:
         return self.get_profile(user_id)
 
     def save_event(self, user_id: str, event: PreferenceEvent) -> None:
-        self._users.document(user_id).collection("preference_events").document(
-            event.event_id
-        ).set(
-            {
-                **event.model_dump(mode="json"),
-                "created_at": self._firestore.SERVER_TIMESTAMP,
-            },
-            merge=True,
+        user_ref = self._users.document(user_id)
+        event_ref = user_ref.collection("preference_events").document(
+            _firestore_document_id(event.event_id)
         )
+        saved_ref = user_ref.collection("saved_places").document(
+            _firestore_document_id(event.place_id)
+        )
+        transaction = self._client.transaction()
+
+        @self._firestore.transactional
+        def commit_event(transaction: Any) -> None:
+            if event_ref.get(transaction=transaction).exists:
+                return
+            transaction.create(
+                event_ref,
+                {
+                    **event.model_dump(mode="json"),
+                    "created_at": self._firestore.SERVER_TIMESTAMP,
+                },
+            )
+            if event.event_type == "save":
+                transaction.set(
+                    saved_ref,
+                    {
+                        "place_id": event.place_id,
+                        "saved_at": self._firestore.SERVER_TIMESTAMP,
+                    },
+                )
+            elif event.event_type == "unsave":
+                transaction.delete(saved_ref)
+
+        commit_event(transaction)
+
+    def recent_events(
+        self,
+        user_id: str,
+        limit: int = 100,
+    ) -> list[PreferenceEventRecord]:
+        query = (
+            self._users.document(user_id)
+            .collection("preference_events")
+            .order_by("created_at", direction=self._firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+        return [
+            PreferenceEventRecord.model_validate(document.to_dict() or {})
+            for document in query.stream()
+        ]
+
+    def saved_place_ids(
+        self,
+        user_id: str,
+        limit: int | None = None,
+    ) -> list[str]:
+        query = (
+            self._users.document(user_id)
+            .collection("saved_places")
+            .order_by("saved_at", direction=self._firestore.Query.DESCENDING)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        return [
+            str((document.to_dict() or {}).get("place_id") or document.id)
+            for document in query.stream()
+        ]
 
     def list_users(self, limit: int = 100) -> list[dict[str, Any]]:
         return [
