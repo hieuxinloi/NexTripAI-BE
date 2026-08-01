@@ -198,7 +198,7 @@ class InMemoryChatStore:
         with self._lock:
             rows = [
                 dict(item)
-                for item in self._sessions.values()
+                for item in reversed(tuple(self._sessions.values()))
                 if user_id is None or item.get("user_id") in {None, user_id}
             ]
         rows.sort(key=lambda item: item.get("updated_at") or datetime.min, reverse=True)

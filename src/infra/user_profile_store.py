@@ -147,7 +147,7 @@ class InMemoryUserProfileStore:
         with self._lock:
             events = [
                 event.model_copy(deep=True)
-                for (owner_id, _), event in self._events.items()
+                for (owner_id, _), event in reversed(tuple(self._events.items()))
                 if owner_id == user_id
             ]
         return sorted(
