@@ -26,7 +26,7 @@ from src.apis.domains.evaluations.workbook import (
     WorkbookValidationError,
     parse_evaluation_workbook,
 )
-from src.security.auth import Principal, current_principal
+from src.security.auth import Principal, require_admin
 
 
 router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
 async def evaluation_history(
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_admin),
 ) -> EvaluationHistoryResponse:
     manager: EvaluationManager = request.app.state.evaluation_manager
     evaluations = await manager.list_history(
@@ -55,7 +55,7 @@ async def create_evaluation(
     request: Request,
     file: UploadFile = File(...),
     kb_version: str = Form(...),
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_admin),
 ) -> EvaluationJobResponse:
     content = await file.read(MAX_WORKBOOK_BYTES + 1)
     try:
@@ -66,6 +66,7 @@ async def create_evaluation(
         kb_version,
         request,
         client_selected=True,
+        principal=principal,
     )
     manager: EvaluationManager = request.app.state.evaluation_manager
     try:
@@ -85,7 +86,7 @@ async def create_evaluation(
 async def evaluation_status(
     job_id: str,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_admin),
 ) -> EvaluationJobResponse:
     manager: EvaluationManager = request.app.state.evaluation_manager
     try:
@@ -100,7 +101,7 @@ async def evaluation_status(
 async def cancel_evaluation(
     job_id: str,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_admin),
 ) -> EvaluationJobResponse:
     manager: EvaluationManager = request.app.state.evaluation_manager
     try:

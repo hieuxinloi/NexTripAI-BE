@@ -3,6 +3,16 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from src.app import create_app
+from src.security.auth import Principal, current_principal
+
+
+def firebase_admin_principal() -> Principal:
+    return Principal(
+        uid="firebase-admin-1",
+        claims={"role": "admin"},
+        auth_mode="firebase",
+        email="admin@example.com",
+    )
 
 
 class FailingKbClient:
@@ -63,6 +73,7 @@ def test_app_exposes_health() -> None:
 
 def test_kb_versions_only_exposes_ready_versions() -> None:
     app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
     with TestClient(app) as client:
         app.state.kb_client = VersionDiscoveryKbClient()
         response = client.get("/api/kb/versions")
@@ -74,8 +85,89 @@ def test_kb_versions_only_exposes_ready_versions() -> None:
     ]
 
 
+def test_auth_profile_exposes_role_permissions() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        user = client.get(
+            "/api/auth/me",
+            headers={
+                "X-Dev-User-ID": "traveler-1",
+                "X-Dev-User-Role": "user",
+                "X-Dev-User-Email": "traveler@example.com",
+            },
+        )
+        app.dependency_overrides[current_principal] = firebase_admin_principal
+        admin = client.get("/api/auth/me")
+
+    assert user.status_code == 200
+    assert user.json() == {
+        "uid": "traveler-1",
+        "email": "traveler@example.com",
+        "display_name": None,
+        "role": "user",
+        "auth_mode": "disabled",
+        "permissions": ["chat"],
+    }
+    assert admin.json()["role"] == "admin"
+    assert admin.json()["auth_mode"] == "firebase"
+    assert admin.json()["permissions"] == [
+        "chat",
+        "evaluate",
+        "select_kb_version",
+    ]
+
+
+def test_normal_user_cannot_access_admin_features() -> None:
+    app = create_app()
+    headers = {
+        "X-Dev-User-ID": "traveler-1",
+        "X-Dev-User-Role": "user",
+    }
+    with TestClient(app) as client:
+        app.state.kb_client = VersionDiscoveryKbClient()
+        versions = client.get("/api/kb/versions", headers=headers)
+        evaluations = client.get("/api/evaluations", headers=headers)
+        selected_chat = client.post(
+            "/api/chat",
+            headers=headers,
+            json={
+                "message": "Goi y cafe",
+                "session_id": "user-selected-version",
+                "kb_version": "v5",
+            },
+        )
+
+    assert versions.status_code == 403
+    assert evaluations.status_code == 403
+    assert selected_chat.status_code == 403
+    assert selected_chat.json() == {
+        "detail": "Only admins can select a Knowledge Base version."
+    }
+
+
+def test_normal_user_chat_uses_active_knowledge_base() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.kb_client = AvailableTypedKbClient()
+        app.state.settings.active_kb_version = "v7"
+        response = client.post(
+            "/api/chat",
+            headers={
+                "X-Dev-User-ID": "traveler-1",
+                "X-Dev-User-Role": "user",
+            },
+            json={
+                "message": "Goi y cafe",
+                "session_id": "user-default-version",
+            },
+        )
+
+    assert response.status_code != 403
+
+
 def test_explicit_unavailable_kb_version_is_not_silently_replaced() -> None:
     app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
     with TestClient(app) as client:
         app.state.kb_client = VersionDiscoveryKbClient()
         app.state.settings.allow_client_kb_version = True
@@ -129,6 +221,7 @@ def test_stream_emits_structured_error_when_kb_is_down() -> None:
 
 def test_explicit_unavailable_version_does_not_silently_fallback() -> None:
     app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
     with TestClient(app) as client:
         app.state.kb_client = OnlyV7ReadyKbClient()
         response = client.post(

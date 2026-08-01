@@ -3,11 +3,12 @@ from __future__ import annotations
 from functools import partial
 
 from anyio import to_thread
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.config import settings
 from src.infra.kb_client import KbClient
+from src.security.auth import Principal, require_admin
 
 router = APIRouter(tags=["health"])
 
@@ -25,7 +26,10 @@ async def live() -> dict[str, str]:
 
 
 @router.get("/api/kb/versions")
-async def kb_versions(request: Request) -> dict[str, object]:
+async def kb_versions(
+    request: Request,
+    _principal: Principal = Depends(require_admin),
+) -> dict[str, object]:
     app_settings = request.app.state.settings
     kb_client: KbClient = request.app.state.kb_client
     try:

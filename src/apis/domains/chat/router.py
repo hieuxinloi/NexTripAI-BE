@@ -87,6 +87,7 @@ def _prepare_request(
         request.kb_version,
         http_request,
         client_selected="kb_version" in request.model_fields_set,
+        principal=principal,
     )
     return AuthenticatedChatRequest.model_validate(
         request.model_dump() | {"user_id": principal.uid, "kb_version": version}
@@ -98,10 +99,20 @@ def select_kb_version(
     http_request: Request,
     *,
     client_selected: bool,
+    principal: Principal,
 ) -> str:
     app_settings: Settings = http_request.app.state.settings
     kb_client: KbClient = http_request.app.state.kb_client
-    use_client_version = app_settings.allow_client_kb_version and client_selected
+    if client_selected and not principal.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can select a Knowledge Base version.",
+        )
+    use_client_version = (
+        app_settings.allow_client_kb_version
+        and client_selected
+        and principal.is_admin
+    )
     if use_client_version:
         candidates = [requested]
     else:
