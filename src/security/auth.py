@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from anyio import to_thread
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.config import Settings
@@ -14,11 +14,20 @@ class Principal:
     uid: str
     claims: dict[str, object]
     auth_mode: str
+    email: str | None = None
+    display_name: str | None = None
+    role: str = ""
+
+    def __post_init__(self) -> None:
+        requested_role = self.role or str(self.claims.get("role") or "user")
+        normalized_role = requested_role.strip().lower()
+        if normalized_role not in {"user", "support", "admin"}:
+            normalized_role = "user"
+        object.__setattr__(self, "role", normalized_role)
 
     @property
-    def role(self) -> str:
-        role = str(self.claims.get("role") or "user").strip().lower()
-        return role if role in {"user", "support", "admin"} else "user"
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
     @property
     def is_anonymous(self) -> bool:
@@ -36,6 +45,13 @@ class Authenticator:
         self._settings = app_settings
         self._bearer = HTTPBearer(auto_error=False)
         self._firebase_auth = None
+        if (
+            app_settings.environment == "production"
+            and app_settings.auth_mode != "firebase"
+        ):
+            raise RuntimeError(
+                "AUTH_MODE=firebase is required when ENVIRONMENT=production."
+            )
         if app_settings.auth_mode == "firebase":
             try:
                 import firebase_admin
@@ -65,11 +81,13 @@ class Authenticator:
     async def authenticate(self, request: Request) -> Principal:
         if self._settings.auth_mode == "disabled":
             uid = request.headers.get("X-Dev-User-ID", "local-user").strip()
-            role = request.headers.get("X-Dev-Role", "user").strip().lower()
             return Principal(
                 uid=uid[:128] or "local-user",
-                claims={"role": role},
+                claims={"role": "user"},
                 auth_mode="disabled",
+                email=request.headers.get("X-Dev-User-Email") or None,
+                display_name=request.headers.get("X-Dev-User-Name") or None,
+                role="user",
             )
 
         credentials: HTTPAuthorizationCredentials | None = await self._bearer(request)
@@ -94,7 +112,16 @@ class Authenticator:
         uid = str(claims.get("uid") or claims.get("sub") or "")
         if not uid:
             raise HTTPException(status_code=401, detail="The token has no user identity.")
-        return Principal(uid=uid, claims=dict(claims), auth_mode="firebase")
+        email = _optional_claim(claims.get("email"))
+        display_name = _optional_claim(claims.get("name"))
+        return Principal(
+            uid=uid,
+            claims=dict(claims),
+            auth_mode="firebase",
+            email=email,
+            display_name=display_name,
+            role=_principal_role(claims),
+        )
 
     def _verify_token(self, token: str) -> dict[str, object]:
         if self._firebase_auth is None:
@@ -108,3 +135,41 @@ class Authenticator:
 async def current_principal(request: Request) -> Principal:
     authenticator: Authenticator = request.app.state.authenticator
     return await authenticator.authenticate(request)
+
+
+async def require_admin(
+    principal: Principal = Depends(current_principal),
+) -> Principal:
+    if not principal.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access is required.",
+        )
+    return principal
+
+
+def _optional_claim(value: object) -> str | None:
+    rendered = str(value or "").strip()
+    return rendered or None
+
+
+def _principal_role(
+    claims: dict[str, object],
+) -> str:
+    if claims.get("admin") is True:
+        return "admin"
+    claimed_role = str(claims.get("role") or "").strip().lower()
+    if claimed_role == "admin":
+        return "admin"
+    roles = claims.get("roles")
+    if isinstance(roles, (list, tuple, set)) and any(
+        str(item).strip().lower() == "admin" for item in roles
+    ):
+        return "admin"
+    if claimed_role == "support":
+        return "support"
+    if isinstance(roles, (list, tuple, set)) and any(
+        str(item).strip().lower() == "support" for item in roles
+    ):
+        return "support"
+    return "user"

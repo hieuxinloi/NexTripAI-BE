@@ -13,6 +13,7 @@ jobs:
       GEMINI_ANSWER_MODEL: gemini-3.5-flash-lite
       GEMINI_PLANNING_MODEL: gemini-3.5-flash-lite
       GEMINI_THINKING_LEVEL: minimal
+      AUTH_MODE: disabled
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

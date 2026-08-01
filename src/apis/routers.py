@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, FastAPI
 
+from src.apis.domains.auth.router import router as auth_router
 from src.apis.domains.chat.router import router as chat_router
 from src.apis.domains.evaluations.router import router as evaluations_router
 from src.apis.domains.health.router import router as health_router
@@ -11,6 +12,7 @@ from src.apis.domains.admin.router import router as admin_router
 
 API_ROUTERS: tuple[APIRouter, ...] = (
     health_router,
+    auth_router,
     chat_router,
     evaluations_router,
     sessions_router,

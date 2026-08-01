@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     firestore_users_collection: str = "users"
     firestore_audit_collection: str = "admin_audit_logs"
     chat_history_limit: int = Field(default=8, ge=1, le=50)
-    auth_mode: Literal["disabled", "firebase"] = "disabled"
+    auth_mode: Literal["disabled", "firebase"] = "firebase"
     firebase_project_id: str | None = None
     kb_auth_mode: Literal["none", "google_oidc"] = "none"
     kb_auth_audience: str | None = None
@@ -87,7 +87,6 @@ class Settings(BaseSettings):
             if item.strip()
         ]
         return [item for item in versions if _KB_VERSION_PATTERN.fullmatch(item)]
-
 
 @lru_cache
 def settings() -> Settings:

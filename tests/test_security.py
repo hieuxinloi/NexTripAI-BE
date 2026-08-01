@@ -23,7 +23,7 @@ def test_principal_normalizes_roles_and_detects_anonymous_users() -> None:
     assert Principal("local-user", {}, "disabled").is_anonymous
 
 
-def test_session_identity_exposes_server_authorization_context() -> None:
+def test_disabled_auth_headers_cannot_elevate_server_role() -> None:
     with TestClient(create_app()) as client:
         response = client.get(
             "/api/me",
@@ -33,7 +33,7 @@ def test_session_identity_exposes_server_authorization_context() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "user_id": "operator",
-        "role": "support",
+        "role": "user",
         "auth_mode": "disabled",
         "is_anonymous": True,
     }

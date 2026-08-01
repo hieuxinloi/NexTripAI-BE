@@ -24,6 +24,7 @@ from src.infra.user_profile_store import (
     _firestore_document_id,
 )
 from src.infra.resilience import CircuitOpenError
+from src.security.auth import Principal, current_principal
 
 
 class FakeRecommendationKbClient:
@@ -149,7 +150,11 @@ def test_disabled_personalization_keeps_explicit_recommendation_context() -> Non
     assert kb_client.request["preferred_concepts"] == []
 
 
-def test_admin_requires_role_and_can_list_users() -> None:
+def test_admin_requires_role_and_can_list_users(monkeypatch) -> None:
+    from firebase_admin import auth
+
+    empty_page = SimpleNamespace(iterate_all=lambda: iter(()))
+    monkeypatch.setattr(auth, "list_users", lambda **_: empty_page)
     app = create_app()
     with TestClient(app) as client:
         client.patch(
@@ -163,10 +168,12 @@ def test_admin_requires_role_and_can_list_users() -> None:
         )
         assert denied.status_code == 403
 
-        allowed = client.get(
-            "/api/admin/users",
-            headers={"X-Dev-User-ID": "operator", "X-Dev-Role": "admin"},
+        app.dependency_overrides[current_principal] = lambda: Principal(
+            uid="firebase-admin-1",
+            claims={"role": "admin"},
+            auth_mode="firebase",
         )
+        allowed = client.get("/api/admin/users")
         assert allowed.status_code == 200
         assert allowed.json()["users"][0]["user_id"] == "alice"
 
