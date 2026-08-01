@@ -85,6 +85,7 @@ Implemented endpoints:
 
 - `GET /live` and `GET /ready`
 - `GET /health`
+- `GET /api/auth/me`
 - `POST /api/chat`
 - `POST /api/chat/stream` (SSE events: `accepted`, `heartbeat`, `result`, `error`)
 - `POST /api/evaluations` (upload `.xlsx` and start an asynchronous evaluation)
@@ -96,6 +97,28 @@ Implemented endpoints:
 - `GET/PATCH/DELETE /api/me/preferences`
 - `POST /api/me/events`
 - `GET /api/admin/users` and GraphRAG deployment administration (admin/support claims)
+
+Authentication uses Firebase ID tokens when `AUTH_MODE=firebase`. The frontend
+handles email/password or Google sign-in and sends the ID token as a Bearer token.
+The backend resolves an account as admin when its Firebase token contains
+`admin=true`, `role=admin`, or a `roles` array containing `admin`. Evaluation APIs and Knowledge Base version
+discovery require admin access. Normal users may chat, but the backend always
+selects `ACTIVE_KB_VERSION` (plus configured fallbacks) and rejects attempts to
+submit a client-selected version.
+
+Local and deployed environments should set `AUTH_MODE=firebase` and
+`FIREBASE_PROJECT_ID=<firebase-project-id>`. `AUTH_MODE=disabled` is reserved for
+automated tests and always produces a normal `user`; request headers cannot grant
+Admin or Support access. Firebase Admin reuses `FIRESTORE_CREDENTIALS_PATH` when that
+service-account file is configured; otherwise it uses Application Default
+Credentials.
+
+Bootstrap or change a privileged role with the Admin SDK helper, then have the
+account sign out and back in so Firebase issues a fresh ID token:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.set_firebase_role --email admin@example.com admin
+```
 
 The chat pipeline calls the KB over HTTP, optionally checks Open-Meteo, and stores
 conversation messages plus rolling memory in memory or Firestore. It never connects
