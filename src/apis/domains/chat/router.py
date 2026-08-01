@@ -12,7 +12,11 @@ from loguru import logger
 
 from src.apis.domains.chat.schemas import AuthenticatedChatRequest, ChatRequest, ChatResponse
 from src.apis.domains.chat.idempotency import IdempotencyCoordinator
-from src.apis.domains.chat.service import KnowledgeBaseUnavailableError
+from src.apis.domains.chat.service import (
+    ConversationKnowledgeBaseVersionError,
+    KnowledgeBaseUnavailableError,
+    KnowledgeBaseVersionMismatchError,
+)
 from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.infra.kb_client import KbClient
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
@@ -108,12 +112,12 @@ def select_kb_version(
             status_code=403,
             detail="Only admins can select a Knowledge Base version.",
         )
-    use_client_version = (
-        app_settings.allow_client_kb_version
-        and client_selected
-        and principal.is_admin
-    )
-    if use_client_version:
+    if client_selected and not app_settings.allow_client_kb_version:
+        raise HTTPException(
+            status_code=409,
+            detail="Knowledge Base version selection is disabled.",
+        )
+    if client_selected:
         candidates = [requested]
     else:
         candidates = list(dict.fromkeys([
@@ -135,7 +139,7 @@ def select_kb_version(
             raise HTTPException(status_code=503, detail="Knowledge Base is not ready.") from exc
         return preferred
     active_version = str(readiness.get("active_version") or "")
-    if not use_client_version and active_version in ready_versions:
+    if not client_selected and active_version in ready_versions:
         return active_version
     for version in candidates:
         if version in ready_versions:
@@ -203,6 +207,10 @@ async def _run_worker(request: AuthenticatedChatRequest, http_request: Request) 
         raise HTTPException(status_code=504, detail="Chat processing timed out.") from exc
     except KnowledgeBaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except KnowledgeBaseVersionMismatchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ConversationKnowledgeBaseVersionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AnswerGenerationUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

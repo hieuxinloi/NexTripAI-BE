@@ -43,6 +43,14 @@ class KnowledgeBaseUnavailableError(RuntimeError):
     pass
 
 
+class KnowledgeBaseVersionMismatchError(RuntimeError):
+    pass
+
+
+class ConversationKnowledgeBaseVersionError(RuntimeError):
+    pass
+
+
 def _build_clarification(
     missing_fields: list[str],
     *,
@@ -55,7 +63,7 @@ def _build_clarification(
             prompt=(
                 "Bạn muốn xem thời tiết ở thành phố nào?"
                 if weather_prompt
-                else "Bạn muốn tìm ở thành phố nào?"
+                else "Bạn muốn đi Quy Nhơn, Đà Nẵng hay xem gợi ý ở cả hai thành phố?"
             ),
             options=[
                 ClarificationOption(label=city, value=city)
@@ -145,6 +153,13 @@ def handle_chat(
         request.session_id,
         user_id=user_id,
     )
+    session_kb_version = session_memory.get("kb_version")
+    if session_kb_version and session_kb_version != request.kb_version:
+        raise ConversationKnowledgeBaseVersionError(
+            "This conversation is pinned to Knowledge Base "
+            f"{str(session_kb_version).upper()}. Start a new conversation to use "
+            f"{request.kb_version.upper()}."
+        )
     personalization = {}
     personalization_enabled = False
     if user_profile_store is not None and user_id:
@@ -243,6 +258,7 @@ def handle_chat(
             request.session_id,
             existing=session_memory,
             summary=resolved_turn.resolution.summary,
+            kb_version=request.kb_version,
             user_id=user_id,
         )
         logger.info(
@@ -272,6 +288,8 @@ def handle_chat(
     )
     agent_result = orchestration.graph
     weather = orchestration.weather
+    if agent_result.error and agent_result.error.get("code") == "kb_version_mismatch":
+        raise KnowledgeBaseVersionMismatchError(agent_result.error["message"])
     if agent_result.error and weather is None:
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
@@ -366,6 +384,7 @@ def handle_chat(
         existing=session_memory,
         summary=resolved_turn.resolution.summary,
         kb_context=agent_result.conversation_context,
+        kb_version=request.kb_version,
         user_id=user_id,
     )
     _record_grounded_place_interest(
@@ -501,15 +520,18 @@ def _save_session_memory(
     existing: dict,
     summary: str | None = None,
     kb_context: dict | None = None,
+    kb_version: str | None = None,
     user_id: str | None = None,
 ) -> None:
-    if chat_store is None or (not summary and not kb_context):
+    if chat_store is None or (not summary and not kb_context and not kb_version):
         return
     memory = dict(existing)
     if summary:
         memory["summary"] = summary
     if kb_context:
         memory["kb_context"] = kb_context
+    if kb_version:
+        memory["kb_version"] = kb_version
     try:
         chat_store.save_session_memory(
             session_id,

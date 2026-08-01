@@ -214,6 +214,38 @@ def _knowledge_typed(
         if conversation_context and supports_structured_conversation_context(kb_version):
             request["conversation_context"] = conversation_context
         payload = TypedKbPayload.model_validate(kb_client.query_typed(**request))
+        if payload.kb_version != kb_version:
+            message = (
+                "Knowledge Base version mismatch: "
+                f"requested {kb_version.upper()}, received {payload.kb_version.upper()}."
+            )
+            trace.append(
+                {
+                    "node": "knowledge",
+                    "status": "error",
+                    "code": "kb_version_mismatch",
+                    "requested_kb_version": kb_version,
+                    "effective_kb_version": payload.kb_version,
+                }
+            )
+            return {
+                **state,
+                "evidence": [],
+                "facts": [],
+                "query_plan": {},
+                "matched_paths": [],
+                "constraint_results": [],
+                "required_tools": [],
+                "itinerary": [],
+                "warnings": [],
+                "conversation_context": {},
+                "error": {
+                    "code": "kb_version_mismatch",
+                    "message": message,
+                    "retryable": False,
+                },
+                "trace": trace,
+            }
         if payload.error:
             trace.extend(_knowledge_trace(payload.trace))
             return {

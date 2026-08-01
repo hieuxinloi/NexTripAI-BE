@@ -60,10 +60,16 @@ async def kb_versions(
     return {
         "status": "ready" if ready_versions else "not_ready",
         "default_version": default_version,
+        "active_version": dependency_default
+        if dependency_default in ready_versions
+        else default_version,
+        "selection_enabled": app_settings.allow_client_kb_version,
         "versions": [
             {
                 "kb_version": version,
                 "label": version.upper(),
+                "ready": True,
+                "selectable": app_settings.allow_client_kb_version,
             }
             for version in ready_versions
         ],

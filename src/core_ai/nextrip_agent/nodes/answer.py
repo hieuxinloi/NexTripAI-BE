@@ -146,6 +146,8 @@ def _not_found_value(field: str) -> str | None:
 
 
 def _clarification_answer(missing_fields: list[str]) -> str:
+    if "city" in missing_fields:
+        return "Bạn muốn đi Quy Nhơn, Đà Nẵng hay xem gợi ý ở cả hai thành phố?"
     if "query_constraints" in missing_fields:
         return (
             "Bạn muốn tìm ở thành phố nào và ưu tiên loại địa điểm hoặc "

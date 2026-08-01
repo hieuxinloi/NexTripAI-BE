@@ -48,7 +48,12 @@ class WeatherAssessment(BaseModel):
 
 
 def normalize_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFD", value.casefold().replace("đ", "d"))
+    # Vietnamese Đ/đ is not decomposed by Unicode NFD. Map it first so
+    # accented city names resolve to the canonical ASCII location keys.
+    normalized = unicodedata.normalize(
+        "NFD",
+        value.casefold().translate(str.maketrans({"đ": "d"})),
+    )
     return "".join(char for char in normalized if unicodedata.category(char) != "Mn")
 
 

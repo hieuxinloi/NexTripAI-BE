@@ -6,6 +6,7 @@ from src.apis.domains.chat.schemas import (
     EvidenceItem,
 )
 from src.apis.domains.chat.service import (
+    _build_clarification,
     _record_grounded_place_interest,
     handle_chat,
     resolve_top_k,
@@ -18,6 +19,21 @@ from src.core_ai.nextrip_agent.constants import (
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
 from src.infra.user_profile_store import InMemoryUserProfileStore
+
+
+def test_missing_city_builds_destination_choice_cards() -> None:
+    clarification = _build_clarification(["city"], required_tools=[])
+
+    assert clarification is not None
+    assert clarification.field == "city"
+    assert clarification.prompt == (
+        "Bạn muốn đi Quy Nhơn, Đà Nẵng hay xem gợi ý ở cả hai thành phố?"
+    )
+    assert [(option.label, option.value) for option in clarification.options] == [
+        ("Đà Nẵng", "Đà Nẵng"),
+        ("Quy Nhơn", "Quy Nhơn"),
+        ("Cả hai thành phố", "all"),
+    ]
 
 
 class FakeKbClient:

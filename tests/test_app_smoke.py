@@ -62,6 +62,35 @@ class OnlyV7ReadyKbClient:
         return {"v7"}
 
 
+class MultiVersionTypedKbClient:
+    def __init__(self, response_version: str | None = None) -> None:
+        self.response_version = response_version
+        self.requested_versions: list[str] = []
+
+    def readiness(self, *, force=False):
+        return {
+            "status": "ready",
+            "active_version": "v8",
+            "ready_versions": ["v5", "v8"],
+        }
+
+    def query_typed(self, *, query, top_k, kb_version):
+        self.requested_versions.append(kb_version)
+        return {
+            "kb_version": self.response_version or kb_version,
+            "answer_type": "recommendation",
+            "recommendations": [],
+            "evidence": [],
+            "facts": [],
+            "missing_fields": [],
+            "query_plan": {},
+            "matched_paths": [],
+            "constraint_results": [],
+            "required_tools": [],
+            "trace": [],
+        }
+
+
 def test_app_exposes_health() -> None:
     with TestClient(create_app()) as client:
         response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
@@ -76,13 +105,26 @@ def test_kb_versions_only_exposes_ready_versions() -> None:
     app.dependency_overrides[current_principal] = firebase_admin_principal
     with TestClient(app) as client:
         app.state.kb_client = VersionDiscoveryKbClient()
+        app.state.settings.allow_client_kb_version = True
         response = client.get("/api/kb/versions")
 
     assert response.status_code == 200
     assert response.json()["versions"] == [
-        {"kb_version": "v5", "label": "V5"},
-        {"kb_version": "v3", "label": "V3"},
+        {
+            "kb_version": "v5",
+            "label": "V5",
+            "ready": True,
+            "selectable": True,
+        },
+        {
+            "kb_version": "v3",
+            "label": "V3",
+            "ready": True,
+            "selectable": True,
+        },
     ]
+    assert response.json()["active_version"] == "v5"
+    assert response.json()["selection_enabled"] is True
 
 
 def test_auth_profile_exposes_role_permissions() -> None:
@@ -184,6 +226,105 @@ def test_explicit_unavailable_kb_version_is_not_silently_replaced() -> None:
     assert response.json() == {
         "detail": "No configured Knowledge Base version is ready: ['v4']"
     }
+
+
+def test_explicit_kb_version_selection_is_strict() -> None:
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+    kb_client = MultiVersionTypedKbClient()
+    with TestClient(app) as client:
+        app.state.kb_client = kb_client
+        app.state.settings.allow_client_kb_version = True
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe o Quy Nhon",
+                "session_id": "strict-v5-session",
+                "kb_version": "v5",
+            },
+        )
+
+    assert response.status_code == 200
+    assert kb_client.requested_versions == ["v5"]
+    assert response.json()["kb_version"] == "v5"
+
+
+def test_explicit_kb_version_is_rejected_when_selection_is_disabled() -> None:
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+    with TestClient(app) as client:
+        app.state.kb_client = MultiVersionTypedKbClient()
+        app.state.settings.allow_client_kb_version = False
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe o Quy Nhon",
+                "session_id": "disabled-selection-session",
+                "kb_version": "v5",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Knowledge Base version selection is disabled."
+    }
+
+
+def test_kb_version_mismatch_is_blocked() -> None:
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+    kb_client = MultiVersionTypedKbClient(response_version="v8")
+    with TestClient(app) as client:
+        app.state.kb_client = kb_client
+        app.state.settings.allow_client_kb_version = True
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe o Quy Nhon",
+                "session_id": "mismatch-session",
+                "kb_version": "v5",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Knowledge Base version mismatch: requested V5, received V8."
+    }
+
+
+def test_conversation_cannot_switch_knowledge_base_version_midstream() -> None:
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+    kb_client = MultiVersionTypedKbClient()
+    with TestClient(app) as client:
+        app.state.kb_client = kb_client
+        app.state.settings.allow_client_kb_version = True
+        first = client.post(
+            "/api/chat",
+            json={
+                "message": "Goi y cafe o Quy Nhon",
+                "session_id": "pinned-version-session",
+                "kb_version": "v5",
+            },
+        )
+        switched = client.post(
+            "/api/chat",
+            json={
+                "message": "Tim them nha hang",
+                "session_id": "pinned-version-session",
+                "kb_version": "v8",
+            },
+        )
+
+    assert first.status_code == 200
+    assert switched.status_code == 409
+    assert switched.json() == {
+        "detail": (
+            "This conversation is pinned to Knowledge Base V5. "
+            "Start a new conversation to use V8."
+        )
+    }
+    assert kb_client.requested_versions == ["v5"]
 
 
 def test_chat_returns_retryable_service_error_when_kb_is_down() -> None:

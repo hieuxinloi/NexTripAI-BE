@@ -4,7 +4,13 @@ from datetime import date, timedelta
 
 import httpx
 
-from src.core_ai.nextrip_agent.weather import WeatherAgent, assess_suitability, vietnam_today
+from src.core_ai.nextrip_agent.weather import (
+    WeatherAgent,
+    _city_location,
+    assess_suitability,
+    normalize_text,
+    vietnam_today,
+)
 from src.infra.weather import OpenMeteoWeatherClient
 
 
@@ -20,6 +26,11 @@ def _weather_payload(today: date) -> dict:
             "wind_gusts_10m_max": [18],
         }
     }
+
+
+def test_accented_da_nang_resolves_to_weather_coordinates() -> None:
+    assert normalize_text("\u0110\u00e0 N\u1eb5ng") == "da nang"
+    assert _city_location("\u0110\u00e0 N\u1eb5ng", "") is not None
 
 
 def test_weather_agent_routes_and_assesses_vietnamese_question() -> None:
