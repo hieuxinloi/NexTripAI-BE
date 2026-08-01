@@ -165,5 +165,82 @@ def test_planning_fallback_drops_wrong_city_and_outdoor_places_in_bad_weather() 
     assert trace["planner"] == "deterministic_fallback"
 
 
+def test_planning_fallback_reuses_a_grounded_place_in_empty_days() -> None:
+    graph = AgentResult(
+        answer="",
+        evidence=[_candidate("attr_only", "attraction", indoor=True)],
+        query_plan={"intent": "plan_candidates", "duration_days": 2},
+    )
+
+    result, trace = planning_agent_node(
+        message="LÃªn lá»‹ch trÃ¬nh Quy NhÆ¡n 2 ngÃ y",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "completed"
+    assert all(day["slots"] for day in result.itinerary)
+    assert all(
+        slot["place_id"] == "attr_only"
+        for day in result.itinerary
+        for slot in day["slots"]
+    )
+
+
+def test_planning_returns_unavailable_when_candidates_cannot_be_planned() -> None:
+    graph = AgentResult(
+        answer="",
+        evidence=[_candidate("dish_only", "dish")],
+        query_plan={"intent": "plan_candidates", "duration_days": 1},
+    )
+
+    result, trace = planning_agent_node(
+        message="LÃªn lá»‹ch trÃ¬nh Quy NhÆ¡n",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "unavailable"
+    assert trace["reason"] == "no_plannable_candidates"
+    assert result.itinerary == []
+
+
+def test_planning_returns_unavailable_when_weather_removes_only_activity() -> None:
+    graph = AgentResult(
+        answer="",
+        evidence=[_candidate("outdoor_only", "attraction", indoor=False)],
+        query_plan={"intent": "plan_candidates", "duration_days": 1},
+    )
+    weather = WeatherAssessment(
+        location=CITY,
+        forecast_date=date(2026, 7, 26),
+        condition="MÆ°a rÃ o",
+        suitability="unsuitable",
+        advice="Æ¯u tiÃªn trong nhÃ .",
+    )
+
+    result, trace = planning_agent_node(
+        message="LÃªn lá»‹ch trÃ¬nh Quy NhÆ¡n",
+        graph=graph,
+        weather_forecast=[weather],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "unavailable"
+    assert trace["reason"] == "no_plannable_candidates"
+    assert result.itinerary == []
+
+
 def test_current_coordinates_resolve_nearest_supported_city() -> None:
     assert supported_city_from_coordinates(13.78, 109.22) == CITY

@@ -83,6 +83,10 @@ ITINERARY_TERMS = (
     "sap xep chuyen di",
 )
 
+PLANNABLE_ENTITY_TYPES = frozenset(
+    {"attraction", "restaurant", "cafe", "hotel", "nightlife"}
+)
+
 
 def is_itinerary_request(message: str, query_plan: dict[str, Any] | None = None) -> bool:
     if (query_plan or {}).get("intent") == "plan_candidates":
@@ -135,6 +139,26 @@ def planning_agent_node(
     )
     if safe_activity_count < duration_days:
         planning_warnings.append("limited_weather_safe_activities")
+    if not _has_fallback_candidates(
+        planner_candidates,
+        duration_nights=duration_nights,
+    ):
+        planning_warnings.append("no_plannable_candidates")
+        updated = graph.model_copy(
+            update={
+                "warnings": list(
+                    dict.fromkeys([*graph.warnings, *planning_warnings])
+                )
+            }
+        )
+        return updated, {
+            "node": "planning",
+            "status": "unavailable",
+            "reason": "no_plannable_candidates",
+            "city": resolved_city,
+            "duration_days": duration_days,
+            "candidate_count": len(candidates),
+        }
     if planner is not None:
         try:
             proposed = planner.plan_itinerary(
@@ -170,23 +194,49 @@ def planning_agent_node(
             )
 
     if plan is None:
-        plan = _fallback_plan(
-            candidates,
-            duration_days=duration_days,
-            duration_nights=duration_nights,
-            weather=_planning_weather(weather_forecast),
-            latitude=latitude,
-            longitude=longitude,
-        )
-        _validate_plan(
-            plan,
-            candidates=candidates,
-            city=resolved_city,
-            duration_days=duration_days,
-            duration_nights=duration_nights,
-            weather_forecast=weather_forecast,
-            require_full_coverage=False,
-        )
+        try:
+            plan = _fallback_plan(
+                candidates,
+                duration_days=duration_days,
+                duration_nights=duration_nights,
+                weather=_planning_weather(weather_forecast),
+                latitude=latitude,
+                longitude=longitude,
+            )
+            _validate_plan(
+                plan,
+                candidates=candidates,
+                city=resolved_city,
+                duration_days=duration_days,
+                duration_nights=duration_nights,
+                weather_forecast=weather_forecast,
+                require_full_coverage=False,
+            )
+        except Exception as exc:
+            planning_warnings.append(
+                f"planning_fallback_unavailable:{exc.__class__.__name__}"
+            )
+            logger.warning(
+                "Planning fallback unavailable city={} error_type={} reason={}",
+                resolved_city,
+                exc.__class__.__name__,
+                str(exc),
+            )
+            updated = graph.model_copy(
+                update={
+                    "warnings": list(
+                        dict.fromkeys([*graph.warnings, *planning_warnings])
+                    )
+                }
+            )
+            return updated, {
+                "node": "planning",
+                "status": "unavailable",
+                "reason": "fallback_plan_invalid",
+                "city": resolved_city,
+                "duration_days": duration_days,
+                "candidate_count": len(candidates),
+            }
 
     itinerary = _materialize(plan, candidates)
     warnings = [*graph.warnings, *planning_warnings]
@@ -431,8 +481,51 @@ def _fallback_plan(
             for start, end, role, item in specs
             if item is not None
         ]
+        if not stops:
+            for entity_type, role, start, end in (
+                ("attraction", ItineraryRole.ACTIVITY, "09:00", "11:00"),
+                ("nightlife", ItineraryRole.ACTIVITY, "18:00", "20:00"),
+                ("restaurant", ItineraryRole.MEAL, "12:00", "13:00"),
+                ("cafe", ItineraryRole.CAFE_BREAK, "16:30", "17:30"),
+                ("hotel", ItineraryRole.REST, "14:00", "15:00"),
+            ):
+                item = take(entity_type, reusable=True)
+                if item is None:
+                    continue
+                if (
+                    role == ItineraryRole.ACTIVITY
+                    and weather is not None
+                    and weather.suitability == "unsuitable"
+                    and _is_explicitly_outdoor(item)
+                ):
+                    continue
+                stops.append(
+                    PlannedStop(
+                        start_time=start,
+                        end_time=end,
+                        place_id=str(item["place_id"]),
+                        role=role,
+                        rationale=_fallback_rationale(role, weather),
+                    )
+                )
+                break
         days.append(PlannedDay(day=day_number, stops=stops))
     return ItineraryPlan(days=days, summary="Lịch trình cân bằng từ các địa điểm đã xác minh.")
+
+
+def _has_fallback_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    duration_nights: int,
+) -> bool:
+    return any(
+        item.get("entity_type") in PLANNABLE_ENTITY_TYPES
+        and (
+            item.get("entity_type") != "hotel"
+            or duration_nights > 0
+        )
+        for item in candidates
+    )
 
 
 def _planning_weather(
