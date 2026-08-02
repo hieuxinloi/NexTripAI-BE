@@ -7,7 +7,7 @@ from typing import Any, cast
 from loguru import logger
 
 from src.config import Settings
-from src.core_ai.nextrip_agent.answer_generation import fact_value_text
+from src.core_ai.nextrip_agent.answer_generation import fact_display_text, fact_value_text
 from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.core_ai.nextrip_agent.planning import ItineraryPlan, ItineraryPlanDraft
 from src.shared.logging import safe_text
@@ -475,7 +475,7 @@ def _protected_context(
         reference = f"[[FACT_{index}]]"
         value = fact_value_text(fact["value"])
         unit = fact.get("unit")
-        replacements[reference] = f"{value} {unit}" if unit else value
+        replacements[reference] = fact_display_text(value, unit)
         protected_facts.append(
             {
                 "reference": reference,

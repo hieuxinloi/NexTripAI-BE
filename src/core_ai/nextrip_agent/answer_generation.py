@@ -16,6 +16,20 @@ def fact_value_text(value: object) -> str:
     return str(value)
 
 
+def fact_display_text(value: object, unit: object | None = None) -> str:
+    """Render a fact value without attaching a currency to non-monetary markers.
+
+    Data sources use ``free`` as a sentinel for complimentary access/parking.
+    It is a semantic value, not a numeric amount, so currency units must be
+    omitted and the Vietnamese UI should present it as ``Miễn phí``.
+    """
+    rendered = fact_value_text(value).strip()
+    if rendered.casefold() in {"free", "complimentary", "miễn phí", "mien phi"}:
+        return "Miễn phí"
+    unit_text = str(unit or "").strip()
+    return f"{rendered} {unit_text}".strip()
+
+
 def facts_for_answer(
     facts: list[dict[str, Any]],
     *,

@@ -2,6 +2,12 @@ from src.core_ai.nextrip_agent.nodes.answer import (
     _clarification_answer,
     _display_missing_fields,
 )
+from src.core_ai.nextrip_agent.answer_generation import fact_display_text
+
+
+def test_free_fact_is_rendered_without_currency() -> None:
+    assert fact_display_text("free", "VND") == "Miễn phí"
+    assert fact_display_text("25000", "VND") == "25000 VND"
 
 
 def test_missing_fields_are_rendered_as_user_facing_labels() -> None:
