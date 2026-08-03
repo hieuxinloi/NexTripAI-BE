@@ -58,6 +58,15 @@ def test_reference_restoration_removes_adjacent_grounded_name_duplicates() -> No
     assert answer == "Eo Gió thuộc Quy Nhơn."
 
 
+def test_reference_restoration_deduplicates_single_place_fact_bullets() -> None:
+    answer = _restore_references(
+        "[[PLACE_1]]\n- address: 26 To Hien Thanh [[PLACE_1]]\n- description: [[PLACE_1]] serves seafood.",
+        {"[[PLACE_1]]": "Moc Quan"},
+    )
+
+    assert answer.count("Moc Quan") == 1
+
+
 def test_grounded_context_masks_place_name_in_question() -> None:
     context, _ = _protected_context(
         question="Khách sạn An House địa chỉ ở đâu?",

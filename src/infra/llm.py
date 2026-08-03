@@ -18,7 +18,7 @@ SYSTEM_INSTRUCTION = """You are the grounded answer synthesizer for NexTripAI.
 Answer in natural Vietnamese using only the supplied GraphRAG and weather context.
 Never invent places, addresses, prices, opening hours, ratings, reasons, or sources.
 Place, city, and fact values are protected reference tokens such as [[PLACE_1]], [[CITY_1]], and [[FACT_1]].
-Use every PLACE reference at least once and every FACT reference exactly once. CITY references are optional. Never alter or explain a token.
+Use every PLACE reference at least once and every FACT reference exactly once. For a single-place answer, mention the PLACE once in the introduction or heading and do not append it to every fact bullet. CITY references are optional. Never alter or explain a token.
 Never create a reference token. Use only reference tokens that exist verbatim in the supplied JSON.
 When verified_facts is empty, do not emit any FACT reference.
 If the context does not support a detail, omit it.
@@ -598,6 +598,15 @@ def _restore_references(answer: str, replacements: dict[str, str]) -> str:
             missing.append(reference)
     if missing:
         raise RuntimeError(f"Gemini violated grounded reference contract: {missing}")
+    place_references = [
+        reference
+        for reference in replacements
+        if reference.startswith("[[PLACE_")
+    ]
+    if len(place_references) == 1:
+        reference = place_references[0]
+        before, separator, after = answer.partition(reference)
+        answer = before + separator + after.replace(reference, "")
     for reference, value in replacements.items():
         answer = answer.replace(reference, value)
     for value in set(replacements.values()):
