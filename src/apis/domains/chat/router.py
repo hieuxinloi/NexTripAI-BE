@@ -104,6 +104,7 @@ def select_kb_version(
     *,
     client_selected: bool,
     principal: Principal,
+    allow_admin_selection: bool = False,
 ) -> str:
     app_settings: Settings = http_request.app.state.settings
     kb_client: KbClient = http_request.app.state.kb_client
@@ -112,7 +113,11 @@ def select_kb_version(
             status_code=403,
             detail="Only admins can select a Knowledge Base version.",
         )
-    if client_selected and not app_settings.allow_client_kb_version:
+    if (
+        client_selected
+        and not app_settings.allow_client_kb_version
+        and not allow_admin_selection
+    ):
         raise HTTPException(
             status_code=409,
             detail="Knowledge Base version selection is disabled.",

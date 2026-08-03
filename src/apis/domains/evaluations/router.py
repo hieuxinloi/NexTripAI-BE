@@ -67,6 +67,7 @@ async def create_evaluation(
         request,
         client_selected=True,
         principal=principal,
+        allow_admin_selection=True,
     )
     manager: EvaluationManager = request.app.state.evaluation_manager
     try:

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from src.app import create_app
+from src.apis.domains.evaluations.schemas import (
+    EvaluationCaseResult,
+    EvaluationJobResponse,
+    EvaluationSummary,
+)
+from src.apis.domains.evaluations.workbook import (
+    EvaluationCaseInput,
+    ParsedEvaluationWorkbook,
+)
 from src.security.auth import Principal, current_principal
 
 
@@ -91,6 +102,41 @@ class MultiVersionTypedKbClient:
         }
 
 
+class CapturingEvaluationManager:
+    def __init__(self) -> None:
+        self.kb_version: str | None = None
+
+    def start(self, *, workbook, filename, kb_version, owner_id):
+        self.kb_version = kb_version
+        cases = [
+            EvaluationCaseResult(
+                row_number=item.row_number,
+                question=item.question,
+                expected=item.expected,
+            )
+            for item in workbook.cases
+        ]
+        return EvaluationJobResponse(
+            job_id="evaluation-v5",
+            filename=filename,
+            sheet_name=workbook.sheet_name,
+            kb_version=kb_version,
+            judge_model="test-judge",
+            pass_threshold=0.8,
+            status="queued",
+            summary=EvaluationSummary(
+                total=len(cases),
+                completed=0,
+                passed=0,
+                failed=0,
+                errors=0,
+                pass_rate=0,
+            ),
+            cases=cases,
+            created_at=datetime.now(timezone.utc),
+        )
+
+
 def test_app_exposes_health() -> None:
     with TestClient(create_app()) as client:
         response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
@@ -125,6 +171,43 @@ def test_kb_versions_only_exposes_ready_versions() -> None:
     ]
     assert response.json()["active_version"] == "v5"
     assert response.json()["selection_enabled"] is True
+
+
+def test_admin_evaluation_honors_selected_kb_when_chat_selection_is_disabled(
+    monkeypatch,
+) -> None:
+    workbook = ParsedEvaluationWorkbook(
+        sheet_name="Test cases",
+        cases=(EvaluationCaseInput(2, "Goi y cafe", "Hai dia diem"),),
+    )
+    monkeypatch.setattr(
+        "src.apis.domains.evaluations.router.parse_evaluation_workbook",
+        lambda _filename, _content: workbook,
+    )
+    manager = CapturingEvaluationManager()
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+
+    with TestClient(app) as client:
+        app.state.kb_client = VersionDiscoveryKbClient()
+        app.state.evaluation_manager = manager
+        app.state.settings.active_kb_version = "v8"
+        app.state.settings.allow_client_kb_version = False
+        response = client.post(
+            "/api/evaluations",
+            data={"kb_version": "v5"},
+            files={
+                "file": (
+                    "cases.xlsx",
+                    b"test workbook",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 202
+    assert manager.kb_version == "v5"
+    assert response.json()["kb_version"] == "v5"
 
 
 def test_auth_profile_exposes_role_permissions() -> None:
