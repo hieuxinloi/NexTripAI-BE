@@ -49,7 +49,6 @@ class TypedKbPayload(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     conversation_context: dict[str, Any] = Field(default_factory=dict)
     trace: list[dict[str, Any]] = Field(default_factory=list)
-    route_context: dict[str, Any] | None = None
     error: TypedServiceError | None = None
 
 
@@ -68,4 +67,3 @@ class AgentResult(BaseModel):
     itinerary: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversation_context: dict[str, Any] = Field(default_factory=dict)
-    route_context: dict[str, Any] | None = None

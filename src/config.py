@@ -34,9 +34,6 @@ class Settings(BaseSettings):
     gemini_input_cost_per_million_usd: float = Field(default=0.0, ge=0)
     gemini_output_cost_per_million_usd: float = Field(default=0.0, ge=0)
     google_api_key: str | None = None
-    google_maps_api_key: str | None = None
-    routes_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
-    routes_cache_ttl_seconds: int = Field(default=604_800, ge=60, le=2_592_000)
     google_cloud_project: str | None = None
     conversation_context_enabled: bool = True
     conversation_context_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

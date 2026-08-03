@@ -34,7 +34,6 @@ from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
 from src.infra.user_profile_store import UserProfileStore
 from src.infra.weather import OpenMeteoWeatherClient
-from src.infra.routes import SupportsRoutes
 
 DEFAULT_TOP_K = 5
 TYPED_QUERY_RESULT_CEILING = 20
@@ -137,7 +136,6 @@ def handle_chat(
     chat_history_limit: int = 8,
     conversation_contextualizer: SupportsConversationContextualization | None = None,
     user_profile_store: UserProfileStore | None = None,
-    route_client: SupportsRoutes | None = None,
 ) -> ChatResponse:
     started_at = perf_counter()
     user_id = getattr(request, "user_id", None)
@@ -275,7 +273,6 @@ def handle_chat(
         kb_client,
         weather_client,
         planning_agent=answer_generator,
-        route_client=route_client,
     ).run(
         message=graph_message,
         session_id=request.session_id,
@@ -320,7 +317,6 @@ def handle_chat(
         *orchestration.trace,
         *agent_result.trace,
         orchestration.weather_trace,
-        orchestration.route_trace,
         orchestration.planning_trace,
         synthesis.trace,
     ]

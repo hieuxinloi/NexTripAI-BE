@@ -77,10 +77,6 @@ def answer_node(
         )
     elif missing_fields:
         answer = _clarification_answer(missing_fields)
-    elif any(
-        fact.get("predicate") == "actual_route_distance" for fact in facts
-    ):
-        answer = _format_route_facts(facts, state.get("route_context") or {})
     elif is_typed_kb_version(state.get("kb_version")) and facts:
         answer = _format_typed_facts(
             evidence,
@@ -235,36 +231,4 @@ def _format_typed_facts(
             f"- {label}: {fact_display_text(fact.get('value'), fact.get('unit'))}"
         )
     return "\n".join(lines)
-
-
-def _format_route_facts(facts: list[dict], route_context: dict) -> str:
-    endpoints = route_context.get("endpoints") or []
-    origin = endpoints[0].get("name", "Điểm xuất phát") if endpoints else "Điểm xuất phát"
-    destination = (
-        endpoints[1].get("name", "Điểm đến")
-        if len(endpoints) > 1
-        else "Điểm đến"
-    )
-    distance = next(
-        fact for fact in facts if fact.get("predicate") == "actual_route_distance"
-    )
-    duration = next(
-        (fact for fact in facts if fact.get("predicate") == "route_duration"),
-        None,
-    )
-    speed = next(
-        (fact for fact in facts if fact.get("predicate") == "user_speed"),
-        None,
-    )
-    speed_text = (
-        f" theo vận tốc {speed['value']:g} km/h" if speed is not None else ""
-    )
-    duration_text = (
-        f" khoảng {duration['value']} phút" if duration is not None else ""
-    )
-    return (
-        f"Từ {origin} đến {destination} có quãng đường thực tế khoảng "
-        f"{distance['value']:g} km{speed_text}, thời gian di chuyển"
-        f"{duration_text}."
-    )
 
