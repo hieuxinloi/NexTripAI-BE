@@ -286,6 +286,7 @@ def _knowledge_typed(
             "itinerary": payload.itinerary,
             "warnings": payload.warnings,
             "conversation_context": payload.conversation_context,
+            "route_context": payload.route_context,
             "trace": trace,
         }
     except Exception as exc:

@@ -61,6 +61,7 @@ def run_nextrip_agent(
         itinerary=list(state.get("itinerary") or []),
         warnings=list(state.get("warnings") or []),
         conversation_context=dict(state.get("conversation_context") or {}),
+        route_context=state.get("route_context"),
     )
     logger.info(
         "NexTrip agent end session_id={} evidence_count={} trace_events={} elapsed_ms={}",

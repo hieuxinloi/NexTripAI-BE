@@ -15,6 +15,7 @@ from src.infra.kb_client import KbClient
 from src.infra.chat_store import create_chat_store
 from src.infra.user_profile_store import create_user_profile_store
 from src.infra.weather import OpenMeteoWeatherClient
+from src.infra.routes import GoogleRoutesClient
 from src.infra.llm import (
     create_answer_generator,
     create_conversation_contextualizer,
@@ -50,6 +51,14 @@ async def lifespan(app: FastAPI):
         circuit_failure_threshold=app_settings.circuit_breaker_failure_threshold,
         circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
     )
+    route_client = GoogleRoutesClient(
+        app_settings.google_maps_api_key or app_settings.google_api_key,
+        timeout_seconds=app_settings.routes_timeout_seconds,
+        cache_ttl_seconds=app_settings.routes_cache_ttl_seconds,
+        retry_attempts=app_settings.resilience_retry_attempts,
+        circuit_failure_threshold=app_settings.circuit_breaker_failure_threshold,
+        circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
+    )
     chat_store = create_chat_store(app_settings)
     user_profile_store = create_user_profile_store(app_settings)
     chat_worker_pool = ChatWorkerPool(
@@ -60,6 +69,7 @@ async def lifespan(app: FastAPI):
         chat_history_limit=app_settings.chat_history_limit,
         conversation_contextualizer=conversation_contextualizer,
         user_profile_store=user_profile_store,
+        route_client=route_client,
     )
     evaluation_manager = EvaluationManager(
         worker_pool=chat_worker_pool,
@@ -75,6 +85,7 @@ async def lifespan(app: FastAPI):
     app.state.conversation_contextualizer = conversation_contextualizer
     app.state.evaluation_manager = evaluation_manager
     app.state.weather_client = weather_client
+    app.state.route_client = route_client
     app.state.chat_store = chat_store
     app.state.user_profile_store = user_profile_store
     app.state.settings = app_settings
@@ -96,6 +107,7 @@ async def lifespan(app: FastAPI):
         if conversation_contextualizer is not None:
             conversation_contextualizer.close()
         weather_client.close()
+        route_client.close()
         chat_store.close()
         user_profile_store.close()
 

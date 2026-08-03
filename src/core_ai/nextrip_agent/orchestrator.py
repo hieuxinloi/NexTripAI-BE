@@ -29,6 +29,11 @@ from src.infra.weather import (
     WeatherLocationRequired,
     WeatherUnavailable,
 )
+from src.infra.routes import (
+    RouteUnavailable,
+    RouteWaypoint,
+    SupportsRoutes,
+)
 
 
 GRAPH_INTENT_TERMS = {
@@ -71,6 +76,7 @@ class OrchestrationMode(str, Enum):
     WEATHER_ONLY = "weather_only"
     GRAPH_AND_WEATHER = "graph_and_weather"
     ITINERARY_PLANNING = "itinerary_planning"
+    GRAPH_AND_ROUTE = "graph_and_route"
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ class OrchestratedResult:
     weather_forecast: list[WeatherAssessment]
     weather_trace: dict[str, Any]
     planning_trace: dict[str, Any]
+    route_trace: dict[str, Any]
     trace: list[dict[str, Any]]
 
 
@@ -171,10 +178,12 @@ class TravelOrchestrator:
         kb_client: SupportsKbSearch,
         weather_client: OpenMeteoWeatherClient | None,
         planning_agent: SupportsItineraryPlanning | None = None,
+        route_client: SupportsRoutes | None = None,
     ) -> None:
         self.kb_client = kb_client
         self.weather_client = weather_client
         self.planning_agent = planning_agent
+        self.route_client = route_client
 
     def run(
         self,
@@ -203,6 +212,7 @@ class TravelOrchestrator:
         weather_forecast: list[WeatherAssessment] = []
         weather_trace: dict[str, Any] = {"node": "weather", "status": "skipped"}
         planning_trace: dict[str, Any] = {"node": "planning", "status": "skipped"}
+        route_trace: dict[str, Any] = {"node": "route", "status": "skipped"}
 
         if plan.run_graph and plan.run_weather:
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="nextrip-tools") as pool:
@@ -312,6 +322,22 @@ class TravelOrchestrator:
                 ),
             )
 
+        if kb_version == "v8" and "route" in graph.required_tools:
+            graph, route_trace = self._run_route(
+                graph,
+                latitude=latitude,
+                longitude=longitude,
+            )
+            if route_trace.get("status") == "completed":
+                plan = OrchestrationPlan(
+                    mode=OrchestrationMode.GRAPH_AND_ROUTE,
+                    run_graph=True,
+                    run_weather=plan.run_weather,
+                    run_planning=plan.run_planning,
+                    reason="v8_actual_route_requested",
+                )
+                trace.append(plan.trace_event())
+
         return OrchestratedResult(
             plan=plan,
             graph=graph,
@@ -319,8 +345,133 @@ class TravelOrchestrator:
             weather_forecast=weather_forecast,
             weather_trace=weather_trace,
             planning_trace=planning_trace,
+            route_trace=route_trace,
             trace=trace,
         )
+
+    def _run_route(
+        self,
+        graph: AgentResult,
+        *,
+        latitude: float | None,
+        longitude: float | None,
+    ) -> tuple[AgentResult, dict[str, Any]]:
+        context = graph.route_context or {}
+        raw_endpoints = list(context.get("endpoints") or [])
+        endpoints = [
+            RouteWaypoint(
+                latitude=float(item["latitude"]),
+                longitude=float(item["longitude"]),
+                place_id=str(item.get("place_id") or "") or None,
+                name=str(item.get("name") or "") or None,
+            )
+            for item in raw_endpoints
+            if item.get("latitude") is not None and item.get("longitude") is not None
+        ]
+        if len(endpoints) >= 2:
+            origin, destination = endpoints[:2]
+        elif len(endpoints) == 1 and latitude is not None and longitude is not None:
+            origin = RouteWaypoint(
+                latitude=latitude,
+                longitude=longitude,
+                name="Vị trí hiện tại",
+            )
+            destination = endpoints[0]
+        else:
+            missing = "current_location" if len(endpoints) == 1 else "route_endpoints"
+            return graph.model_copy(
+                update={
+                    "missing_fields": list(
+                        dict.fromkeys([*graph.missing_fields, missing])
+                    )
+                }
+            ), {
+                "node": "route",
+                "status": "needs_input",
+                "reason": missing,
+            }
+        if self.route_client is None or not self.route_client.configured:
+            return graph, {
+                "node": "route",
+                "status": "unavailable",
+                "reason": "Google Routes API is not configured.",
+            }
+        options = dict(context.get("options") or {})
+        travel_mode = str(options.get("travel_mode") or "car")
+        raw_speed = options.get("speed_kmh")
+        speed_kmh = float(raw_speed) if raw_speed is not None else None
+        started_at = perf_counter()
+        try:
+            route = self.route_client.compute_route(
+                origin,
+                destination,
+                travel_mode=travel_mode,
+                speed_kmh=speed_kmh,
+            )
+        except (RouteUnavailable, ValueError) as exc:
+            return graph, {
+                "node": "route",
+                "status": "unavailable",
+                "reason": str(exc),
+                "elapsed_ms": int((perf_counter() - started_at) * 1000),
+            }
+        subject_id = origin.place_id or "current-location"
+        distance_km = round(route.distance_meters / 1000, 3)
+        duration_minutes = max(1, round(route.duration_seconds / 60))
+        route_facts = [
+            {
+                "fact_id": f"route-distance:{subject_id}:{destination.place_id or 'destination'}:{travel_mode}",
+                "subject_id": subject_id,
+                "predicate": "actual_route_distance",
+                "value": distance_km,
+                "value_type": "number",
+                "unit": "km",
+                "confidence": 1.0,
+                "evidence_ids": [],
+            },
+            {
+                "fact_id": f"route-duration:{subject_id}:{destination.place_id or 'destination'}:{travel_mode}",
+                "subject_id": subject_id,
+                "predicate": "route_duration",
+                "value": duration_minutes,
+                "value_type": "number",
+                "unit": "minutes",
+                "confidence": 1.0,
+                "evidence_ids": [],
+            },
+        ]
+        if route.speed_kmh is not None:
+            route_facts.append(
+                {
+                    "fact_id": f"route-speed:{subject_id}:{destination.place_id or 'destination'}",
+                    "subject_id": subject_id,
+                    "predicate": "user_speed",
+                    "value": route.speed_kmh,
+                    "value_type": "number",
+                    "unit": "km/h",
+                    "confidence": 1.0,
+                    "evidence_ids": [],
+                }
+            )
+        trace = {
+            "node": "route",
+            "status": "completed",
+            "provider": route.provider,
+            "travel_mode": travel_mode,
+            "distance_meters": route.distance_meters,
+            "duration_source": route.duration_source,
+            "elapsed_ms": int((perf_counter() - started_at) * 1000),
+        }
+        return graph.model_copy(
+            update={
+                "answer_type": "route",
+                "facts": [*graph.facts, *route_facts],
+                "required_tools": [
+                    tool for tool in graph.required_tools if tool != "route"
+                ],
+                "trace": [*graph.trace, trace],
+            }
+        ), trace
     def _run_graph(
         self,
         *,

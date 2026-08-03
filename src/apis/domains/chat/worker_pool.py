@@ -20,6 +20,7 @@ from src.infra.kb_client import KbClient
 from src.infra.chat_store import ChatStore
 from src.infra.user_profile_store import UserProfileStore
 from src.infra.weather import OpenMeteoWeatherClient
+from src.infra.routes import SupportsRoutes
 from src.shared.request_context import current_request_id
 
 
@@ -54,6 +55,7 @@ class ChatWorkerPool:
         conversation_contextualizer: SupportsConversationContextualization
         | None = None,
         user_profile_store: UserProfileStore | None = None,
+        route_client: SupportsRoutes | None = None,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be positive")
@@ -67,6 +69,7 @@ class ChatWorkerPool:
         self._chat_history_limit = chat_history_limit
         self._conversation_contextualizer = conversation_contextualizer
         self._user_profile_store = user_profile_store
+        self._route_client = route_client
         self._send_stream: MemoryObjectSendStream[ChatJob] | None = None
         self._active_jobs = 0
 
@@ -169,7 +172,11 @@ class ChatWorkerPool:
                         queue_wait_ms,
                     )
                     try:
-                        if self._weather_client is None and self._chat_store is None:
+                        if (
+                            self._weather_client is None
+                            and self._chat_store is None
+                            and self._route_client is None
+                        ):
                             handler = partial(
                                 self._handler,
                                 job.request,
@@ -187,6 +194,7 @@ class ChatWorkerPool:
                                 chat_history_limit=self._chat_history_limit,
                                 conversation_contextualizer=self._conversation_contextualizer,
                                 user_profile_store=self._user_profile_store,
+                                route_client=self._route_client,
                             )
                         job.result = await to_thread.run_sync(
                             handler,

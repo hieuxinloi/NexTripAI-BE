@@ -28,3 +28,4 @@ class NexTripAgentState(TypedDict, total=False):
     itinerary: list[dict[str, Any]]
     warnings: list[str]
     conversation_context: dict[str, Any]
+    route_context: dict[str, Any] | None
