@@ -277,6 +277,6 @@ def _is_retryable(exc: Exception) -> bool:
 def _payload_result_count(payload: dict[str, Any]) -> int:
     for field in ("results", "entities", "recommendations", "items"):
         value = payload.get(field)
-        if isinstance(value, list):
+        if isinstance(value, list) and value:
             return len(value)
     return 0

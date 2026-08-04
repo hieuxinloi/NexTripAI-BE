@@ -49,6 +49,18 @@ def test_payload_result_count_supports_recommendation_items() -> None:
     assert _payload_result_count({"items": []}) == 0
 
 
+def test_payload_result_count_skips_empty_typed_entity_collection() -> None:
+    payload = {
+        "entities": [],
+        "recommendations": [
+            {"place_id": "one"},
+            {"place_id": "two"},
+        ],
+    }
+
+    assert _payload_result_count(payload) == 2
+
+
 def test_kb_client_calls_v3_query_contract() -> None:
     captured = {}
 
