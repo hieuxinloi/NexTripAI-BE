@@ -128,8 +128,8 @@ Minimum env:
 NEXTRIP_KB_BASE_URL=http://localhost:8010
 WEATHER_PROVIDER=mock
 GOOGLE_API_KEY=your-google-ai-studio-key
-GEMINI_CONTEXT_MODEL=gemini-3.5-flash-lite
-GEMINI_ANSWER_MODEL=gemini-3.5-flash-lite
+GEMINI_CONTEXT_MODEL=gemini-2.5-flash
+GEMINI_ANSWER_MODEL=gemini-2.5-flash
 GEMINI_THINKING_LEVEL=minimal
 ```
 
