@@ -199,6 +199,8 @@ class TravelOrchestrator:
         )
         trace = [plan.trace_event()]
         effective_city = city or supported_city_from_coordinates(latitude, longitude)
+        is_v8 = str(kb_version).lower() == "v8"
+        graph_top_k = max(top_k, 20) if plan.run_planning and is_v8 else top_k
         weather: WeatherAssessment | None = None
         weather_forecast: list[WeatherAssessment] = []
         weather_trace: dict[str, Any] = {"node": "weather", "status": "skipped"}
@@ -212,7 +214,7 @@ class TravelOrchestrator:
                     session_id=session_id,
                     city=effective_city,
                     entity_types=entity_types,
-                    top_k=top_k,
+                    top_k=graph_top_k,
                     kb_version=kb_version,
                     conversation_context=conversation_context,
                 )
@@ -240,7 +242,7 @@ class TravelOrchestrator:
                 session_id=session_id,
                 city=effective_city,
                 entity_types=entity_types,
-                top_k=top_k,
+                top_k=graph_top_k,
                 kb_version=kb_version,
                 conversation_context=conversation_context,
             )
@@ -303,7 +305,12 @@ class TravelOrchestrator:
                 message=message,
                 graph=graph,
                 weather_forecast=weather_forecast,
-                planner=self.planning_agent,
+                # V8 already returns a deterministic, graph-grounded candidate
+                # set.  Calling a second LLM planner here was the main source
+                # of 45s timeouts in itinerary evaluation.  Let the validated
+                # deterministic planner build the schedule for V8; older KB
+                # versions retain their historical LLM planner behaviour.
+                planner=(self.planning_agent if not is_v8 else None),
                 city=effective_city,
                 latitude=latitude,
                 longitude=longitude,

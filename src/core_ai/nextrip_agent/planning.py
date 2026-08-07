@@ -121,6 +121,14 @@ def planning_agent_node(
         }
 
     candidates = _city_candidates(graph.evidence, resolved_city)
+    # Keep explicit exclusions out of the candidate pool before ranking.  A
+    # nightlife result should never re-enter an itinerary that explicitly
+    # rejects bars or clubs merely because it scored highly in retrieval.
+    normalized_message = normalize_text(message)
+    if any(term in normalized_message for term in ("khong bar", "khong club", "khong muon di bar", "khong muon di club")):
+        candidates = [
+            item for item in candidates if item.get("entity_type") != "nightlife"
+        ]
     if not candidates:
         return graph, {
             "node": "planning",
@@ -202,6 +210,7 @@ def planning_agent_node(
                 weather=_planning_weather(weather_forecast),
                 latitude=latitude,
                 longitude=longitude,
+                message=message,
             )
             _validate_plan(
                 plan,
@@ -422,6 +431,7 @@ def _fallback_plan(
     weather: WeatherAssessment | None,
     latitude: float | None,
     longitude: float | None,
+    message: str = "",
 ) -> ItineraryPlan:
     pools = {
         entity_type: _rank_candidates(
@@ -439,6 +449,7 @@ def _fallback_plan(
             weather=weather,
             latitude=latitude,
             longitude=longitude,
+            message=message,
         )
         for entity_type in ("attraction", "restaurant", "cafe", "hotel", "nightlife")
     }
@@ -455,19 +466,31 @@ def _fallback_plan(
 
     hotel = take("hotel", reusable=True) if duration_nights else None
     days: list[PlannedDay] = []
+    normalized_message = normalize_text(message)
+    compact_pace = any(
+        term in normalized_message
+        for term in ("nguoi lon tuoi", "nguoi cao tuoi", "nhe nhang", "khong qua nhieu")
+    )
+    family_pace = any(term in normalized_message for term in ("tre nho", "gia dinh"))
+    food_focus = any(term in normalized_message for term in ("am thuc", "an uong", "mon ngon", "quan an"))
+    beach_focus = any(term in normalized_message for term in ("bien", "bai tam", "beach", "ven bien"))
+    culture_focus = any(term in normalized_message for term in ("van hoa", "lich su", "bao tang", "di tich", "chua", "thap"))
     for day_number in range(1, duration_days + 1):
         specs: list[tuple[str, str, ItineraryRole, dict[str, Any] | None]] = []
         if day_number > 1 and hotel is not None:
             specs.append(("08:00", "08:30", ItineraryRole.CHECK_OUT, hotel))
-        specs.extend(
-            [
-                ("09:00", "11:00", ItineraryRole.ACTIVITY, take("attraction")),
-                ("11:30", "13:00", ItineraryRole.MEAL, take("restaurant")),
-                ("14:00", "16:00", ItineraryRole.ACTIVITY, take("attraction")),
-                ("16:30", "17:30", ItineraryRole.CAFE_BREAK, take("cafe")),
-                ("18:00", "19:30", ItineraryRole.MEAL, take("restaurant")),
-            ]
-        )
+        specs.extend([
+            ("09:00", "11:00", ItineraryRole.ACTIVITY, take("attraction")),
+            ("11:30", "13:00", ItineraryRole.MEAL, take("restaurant")),
+        ])
+        # A lighter schedule is intentional for elderly travellers and family
+        # requests.  Full schedules still expose a second attraction and a
+        # break, while food-focused requests keep two meal slots.
+        if not compact_pace:
+            specs.append(("14:00", "16:00", ItineraryRole.ACTIVITY, take("attraction")))
+        specs.append(("16:30", "17:30", ItineraryRole.CAFE_BREAK, take("cafe")))
+        if not compact_pace or food_focus:
+            specs.append(("18:00", "19:30", ItineraryRole.MEAL, take("restaurant")))
         if day_number <= duration_nights and hotel is not None:
             specs.append(("20:00", "20:30", ItineraryRole.CHECK_IN, hotel))
         stops = [
@@ -543,16 +566,57 @@ def _rank_candidates(
     weather: WeatherAssessment | None,
     latitude: float | None,
     longitude: float | None,
+    message: str = "",
 ) -> list[dict[str, Any]]:
+    normalized_message = normalize_text(message)
+    compact_pace = any(
+        term in normalized_message
+        for term in ("nguoi lon tuoi", "nguoi cao tuoi", "nhe nhang", "khong qua nhieu")
+    )
+    budget_focus = any(term in normalized_message for term in ("tiet kiem", "re", "ngan sach", "budget"))
+    rain_focus = any(term in normalized_message for term in ("mua", "mua phun", "thoi tiet xau", "rain"))
+    beach_focus = any(term in normalized_message for term in ("bien", "bai tam", "beach", "ven bien"))
+    culture_focus = any(term in normalized_message for term in ("van hoa", "lich su", "bao tang", "di tich", "chua", "thap"))
+    food_focus = any(term in normalized_message for term in ("am thuc", "an uong", "mon ngon", "quan an"))
+    family_focus = any(term in normalized_message for term in ("tre nho", "gia dinh"))
+    excluded_nightlife = any(term in normalized_message for term in ("khong bar", "khong club", "khong muon di bar", "khong muon di club"))
+
     def key(item: dict[str, Any]) -> tuple[float, float, str]:
-        outdoor_penalty = 1.0 if (
-            weather is not None
-            and weather.suitability == "unsuitable"
-            and _is_explicitly_outdoor(item)
-        ) else 0.0
+        attributes = item.get("attributes") or {}
+        searchable = normalize_text(" ".join(
+            str(item.get(key) or "") for key in ("name", "category", "description")
+        ) + " " + " ".join(str(value) for value in attributes.values()))
+        outdoor_penalty = 0.0
+        if weather is not None and weather.suitability == "unsuitable" and _is_explicitly_outdoor(item):
+            outdoor_penalty += 10.0
+        elif rain_focus:
+            if _is_explicitly_outdoor(item):
+                outdoor_penalty += 2.0
+            if attributes.get("is_indoor") is True or attributes.get("indoor") is True or "all weather" in searchable or "light rain" in searchable:
+                outdoor_penalty -= 2.0
+        preference_bonus = 0.0
+        entity_type = str(item.get("entity_type") or "")
+        if excluded_nightlife and entity_type == "nightlife":
+            preference_bonus += 100.0
+        if beach_focus and any(term in searchable for term in ("bien", "beach", "sea", "coast", "bai tam", "ven bien")):
+            preference_bonus -= 4.0
+        if culture_focus and any(term in searchable for term in ("van hoa", "lich su", "museum", "bao tang", "chua", "thap", "di tich")):
+            preference_bonus -= 4.0
+        if food_focus and entity_type == "restaurant":
+            preference_bonus -= 3.0
+        if family_focus and any(term in searchable for term in ("family", "gia dinh", "tre em", "children")):
+            preference_bonus -= 2.0
+        if compact_pace and any(term in searchable for term in ("museum", "bao tang", "park", "cafe", "spa", "hot spring", "suoi khoang")):
+            preference_bonus -= 1.5
+        if budget_focus:
+            maximum = attributes.get("price_per_person_max")
+            try:
+                preference_bonus += min(float(maximum) / 1_000_000, 5.0) if maximum is not None else 0.0
+            except (TypeError, ValueError):
+                pass
         distance = _distance_from_origin(item, latitude, longitude)
         score = float(item.get("score") or 0)
-        return outdoor_penalty, distance - score, str(item.get("place_id"))
+        return outdoor_penalty + preference_bonus, distance - score, str(item.get("place_id"))
 
     return sorted(candidates, key=key)
 
