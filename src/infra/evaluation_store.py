@@ -44,6 +44,8 @@ class EvaluationStore(Protocol):
         limit: int,
     ) -> list[EvaluationHistoryItem]: ...
 
+    def delete_job(self, job_id: str, *, owner_id: str) -> bool: ...
+
     def close(self) -> None: ...
 
 
@@ -107,6 +109,10 @@ class InMemoryEvaluationStore:
                 reverse=True,
             )[:limit]
             return [_history_item(job) for job in jobs]
+
+    def delete_job(self, job_id: str, *, owner_id: str) -> bool:
+        with self._lock:
+            return self._jobs.pop((owner_id, job_id), None) is not None
 
     def close(self) -> None:
         return None
@@ -202,6 +208,21 @@ class FirestoreEvaluationStore:
             for snapshot in runs
         ]
 
+    def delete_job(self, job_id: str, *, owner_id: str) -> bool:
+        run = self._run_document(owner_id, job_id)
+        if not run.get().exists:
+            return False
+        pending = []
+        for snapshot in run.collection(EVALUATION_CASES_COLLECTION).stream():
+            pending.append(snapshot.reference)
+            if len(pending) == 400:
+                self._delete_documents(pending)
+                pending = []
+        if pending:
+            self._delete_documents(pending)
+        run.delete()
+        return True
+
     def close(self) -> None:
         self._client.close()
 
@@ -214,6 +235,12 @@ class FirestoreEvaluationStore:
 
     def _run_document(self, owner_id: str, job_id: str):
         return self._runs_collection(owner_id).document(job_id)
+
+    def _delete_documents(self, documents: list[Any]) -> None:
+        batch = self._client.batch()
+        for document in documents:
+            batch.delete(document)
+        batch.commit()
 
 
 def create_evaluation_store(app_settings: Settings) -> EvaluationStore:

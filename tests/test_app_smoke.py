@@ -137,6 +137,15 @@ class CapturingEvaluationManager:
         )
 
 
+class DeletingEvaluationManager:
+    def __init__(self) -> None:
+        self.deleted: tuple[str, str] | None = None
+
+    async def delete_history(self, job_id: str, *, owner_id: str) -> bool:
+        self.deleted = (job_id, owner_id)
+        return True
+
+
 def test_app_exposes_health() -> None:
     with TestClient(create_app()) as client:
         response = client.get("/health", headers={"X-Request-ID": "test-request-id"})
@@ -208,6 +217,20 @@ def test_admin_evaluation_honors_selected_kb_when_chat_selection_is_disabled(
     assert response.status_code == 202
     assert manager.kb_version == "v5"
     assert response.json()["kb_version"] == "v5"
+
+
+def test_admin_can_delete_owned_evaluation_history() -> None:
+    manager = DeletingEvaluationManager()
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+
+    with TestClient(app) as client:
+        app.state.evaluation_manager = manager
+        response = client.delete("/api/evaluations/job-1/history")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+    assert manager.deleted == ("job-1", firebase_admin_principal().uid)
 
 
 def test_auth_profile_exposes_role_permissions() -> None:

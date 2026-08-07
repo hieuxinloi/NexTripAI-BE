@@ -84,3 +84,7 @@ class EvaluationHistoryItem(BaseModel):
 
 class EvaluationHistoryResponse(BaseModel):
     evaluations: list[EvaluationHistoryItem]
+
+
+class EvaluationDeleteResponse(BaseModel):
+    deleted: bool

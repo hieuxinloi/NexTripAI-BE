@@ -94,5 +94,9 @@ async def test_manager_runs_chat_and_judge_for_each_case() -> None:
     history = await manager.list_history(owner_id="user-a", limit=10)
     assert history[0].job_id == result.job_id
     assert history[0].summary.passed == 2
+    assert await manager.delete_history(result.job_id, owner_id="user-a") is True
+    assert await manager.list_history(owner_id="user-a", limit=10) == []
+    with pytest.raises(KeyError):
+        await manager.get(result.job_id, owner_id="user-a")
     await manager.close()
     assert judge.closed is True

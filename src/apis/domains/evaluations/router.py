@@ -18,6 +18,7 @@ from src.apis.domains.evaluations.manager import (
     EvaluationManager,
 )
 from src.apis.domains.evaluations.schemas import (
+    EvaluationDeleteResponse,
     EvaluationHistoryResponse,
     EvaluationJobResponse,
 )
@@ -111,3 +112,27 @@ async def cancel_evaluation(
         raise HTTPException(status_code=404, detail="Không tìm thấy lượt đánh giá.") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="Bạn không có quyền hủy lượt đánh giá này.") from exc
+
+
+@router.delete("/{job_id}/history", response_model=EvaluationDeleteResponse)
+async def delete_evaluation_history(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+) -> EvaluationDeleteResponse:
+    manager: EvaluationManager = request.app.state.evaluation_manager
+    try:
+        deleted = await manager.delete_history(job_id, owner_id=principal.uid)
+        return EvaluationDeleteResponse(deleted=deleted)
+    except EvaluationAlreadyRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy lượt đánh giá.",
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="Bạn không có quyền xóa lượt đánh giá này.",
+        ) from exc

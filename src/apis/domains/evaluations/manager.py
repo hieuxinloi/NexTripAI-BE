@@ -32,6 +32,7 @@ from src.infra.kb_client import KbClient
 
 PASS_THRESHOLD = 0.8
 MAX_RETAINED_JOBS = 20
+TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 
 
 class EvaluationAlreadyRunningError(RuntimeError):
@@ -95,9 +96,7 @@ class EvaluationManager:
         owner_id: str,
     ) -> EvaluationJobResponse:
         if not self.available or self._judge is None:
-            raise RuntimeError(
-                "Evaluation requires Gemini answer generation and GOOGLE_API_KEY."
-            )
+            raise RuntimeError("Evaluation requires Gemini answer generation and GOOGLE_API_KEY.")
         if any(
             job.owner_id == owner_id and job.status in {"queued", "running"}
             for job in self._jobs.values()
@@ -199,6 +198,31 @@ class EvaluationManager:
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
         return self._snapshot(job)
+
+    async def delete_history(self, job_id: str, *, owner_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if job is not None and job.owner_id != owner_id:
+            raise PermissionError(job_id)
+        task = self._tasks.get(job_id)
+        if job is not None and job.status not in TERMINAL_STATUSES:
+            raise EvaluationAlreadyRunningError(
+                "Không thể xóa lượt đánh giá đang chạy. Hãy hủy lượt chạy trước."
+            )
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+        deleted = await to_thread.run_sync(
+            partial(
+                self._evaluation_store.delete_job,
+                job_id,
+                owner_id=owner_id,
+            ),
+            abandon_on_cancel=False,
+        )
+        if not deleted:
+            raise KeyError(job_id)
+        self._jobs.pop(job_id, None)
+        self._tasks.pop(job_id, None)
+        return True
 
     async def close(self) -> None:
         tasks = [task for task in self._tasks.values() if not task.done()]

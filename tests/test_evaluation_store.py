@@ -59,3 +59,13 @@ def test_memory_evaluation_store_round_trips_job_and_case() -> None:
     assert restored.cases[0].status == "passed"
     assert history[0].job_id == "job-1"
     assert store.get_job("job-1", owner_id="user-b") is None
+
+
+def test_memory_evaluation_store_deletes_only_owned_job() -> None:
+    store = InMemoryEvaluationStore()
+    store.save_job(_job(), owner_id="user-a")
+
+    assert store.delete_job("job-1", owner_id="user-b") is False
+    assert store.get_job("job-1", owner_id="user-a") is not None
+    assert store.delete_job("job-1", owner_id="user-a") is True
+    assert store.get_job("job-1", owner_id="user-a") is None
