@@ -12,6 +12,7 @@ from src.apis.domains.evaluations.manager import EvaluationManager
 from src.apis.routers import include_api_routers
 from src.config import settings
 from src.infra.kb_client import KbClient
+from src.infra.current_data_client import CurrentDataClient
 from src.infra.chat_store import create_chat_store
 from src.infra.user_profile_store import create_user_profile_store
 from src.infra.weather import OpenMeteoWeatherClient
@@ -50,6 +51,20 @@ async def lifespan(app: FastAPI):
         circuit_failure_threshold=app_settings.circuit_breaker_failure_threshold,
         circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
     )
+    current_data_client = None
+    if app_settings.current_data_enabled:
+        if not app_settings.current_data_api_key:
+            raise RuntimeError(
+                "CURRENT_DATA_API_KEY is required when CURRENT_DATA_ENABLED=true"
+            )
+        current_data_client = CurrentDataClient(
+            app_settings.current_data_base_url,
+            app_settings.current_data_api_key,
+            timeout_seconds=app_settings.current_data_timeout_seconds,
+            retry_attempts=app_settings.resilience_retry_attempts,
+            circuit_failure_threshold=app_settings.circuit_breaker_failure_threshold,
+            circuit_recovery_seconds=app_settings.circuit_breaker_recovery_seconds,
+        )
     chat_store = create_chat_store(app_settings)
     user_profile_store = create_user_profile_store(app_settings)
     chat_worker_pool = ChatWorkerPool(
@@ -60,6 +75,7 @@ async def lifespan(app: FastAPI):
         chat_history_limit=app_settings.chat_history_limit,
         conversation_contextualizer=conversation_contextualizer,
         user_profile_store=user_profile_store,
+        current_data_client=current_data_client,
     )
     evaluation_manager = EvaluationManager(
         worker_pool=chat_worker_pool,
@@ -75,6 +91,7 @@ async def lifespan(app: FastAPI):
     app.state.conversation_contextualizer = conversation_contextualizer
     app.state.evaluation_manager = evaluation_manager
     app.state.weather_client = weather_client
+    app.state.current_data_client = current_data_client
     app.state.chat_store = chat_store
     app.state.user_profile_store = user_profile_store
     app.state.settings = app_settings
@@ -96,6 +113,8 @@ async def lifespan(app: FastAPI):
         if conversation_contextualizer is not None:
             conversation_contextualizer.close()
         weather_client.close()
+        if current_data_client is not None:
+            current_data_client.close()
         chat_store.close()
         user_profile_store.close()
 

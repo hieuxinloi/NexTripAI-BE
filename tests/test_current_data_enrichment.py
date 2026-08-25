@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from datetime import date
+
+from src.core_ai.nextrip_agent.current_data import enrich_current_data
+from src.core_ai.nextrip_agent.schemas import AgentResult
+
+
+class FakeCurrentData:
+    def __init__(self) -> None:
+        self.hotel_request: dict | None = None
+
+    def places(self, place_ids):
+        assert place_ids == ["hotel_qn_001", "attr_qn_001"]
+        return {
+            "items": [
+                {
+                    "place_id": "hotel_qn_001",
+                    "status": "available",
+                    "current": {
+                        "master_name": "Old Hotel",
+                        "stale": False,
+                        "place": {
+                            "place_id": "hotel_qn_001",
+                            "name": "Trivago Hotel Name",
+                            "city": "Quy Nhơn",
+                            "entity_type": "hotel",
+                            "category": "hotel",
+                            "business_status": "operational",
+                            "price_level": 2,
+                            "location": {"lat": 13.77, "lng": 109.23},
+                            "updated_at": "2026-08-25T00:00:00Z",
+                        },
+                    },
+                }
+            ]
+        }
+
+    def hotel_availability(self, **kwargs):
+        self.hotel_request = kwargs
+        return {
+            "results": [
+                {
+                    "hotel_id": "hotel_qn_001",
+                    "selected_window_index": 1,
+                    "windows": [
+                        {
+                            "fallback_offset_days": 0,
+                            "availability": "unavailable",
+                            "offers": [],
+                        },
+                        {
+                            "fallback_offset_days": 1,
+                            "availability": "available",
+                            "offers": [{"currency": "VND", "amount": "850000"}],
+                        },
+                    ],
+                }
+            ]
+        }
+
+    def recommend_transport(self, **kwargs):
+        return {
+            "status": "recommended",
+            "recommended_mode": "drive",
+            "selection_reason": "fastest_route_duration",
+            "degraded": False,
+            "partial": False,
+            "options": [
+                {
+                    "mode": "drive",
+                    "status": "eligible",
+                    "recommended": True,
+                    "rank": 1,
+                    "distance_meters": 12500,
+                    "duration_seconds": 1200,
+                    "reason_codes": ["route_available"],
+                    "route": {
+                        "route": {
+                            "provider": "here",
+                            "traffic_basis": "current",
+                            "traffic_aware": True,
+                        }
+                    },
+                }
+            ],
+        }
+
+
+def _graph() -> AgentResult:
+    return AgentResult(
+        answer="",
+        answer_type="itinerary_planning",
+        evidence=[
+            {
+                "place_id": "hotel_qn_001",
+                "name": "Old Hotel",
+                "city": "Quy Nhơn",
+                "entity_type": "hotel",
+                "attributes": {},
+            },
+            {
+                "place_id": "attr_qn_001",
+                "name": "Eo Gió",
+                "city": "Quy Nhơn",
+                "entity_type": "attraction",
+                "attributes": {},
+            },
+        ],
+        query_plan={"duration_days": 3},
+        required_tools=["live_status", "live_price", "booking", "route", "transport"],
+        itinerary=[
+            {
+                "day": 1,
+                "slots": [
+                    {
+                        "order": 1,
+                        "start_time": "08:00",
+                        "end_time": "08:30",
+                        "place_id": "hotel_qn_001",
+                        "name": "Old Hotel",
+                        "city": "Quy Nhơn",
+                        "entity_type": "hotel",
+                        "rationale": "Check-out",
+                    },
+                    {
+                        "order": 2,
+                        "start_time": "09:00",
+                        "end_time": "11:00",
+                        "place_id": "attr_qn_001",
+                        "name": "Eo Gió",
+                        "city": "Quy Nhơn",
+                        "entity_type": "attraction",
+                        "rationale": "Visit",
+                    },
+                ],
+            }
+        ],
+    )
+
+
+def test_enrichment_preserves_contract_and_attaches_current_context() -> None:
+    client = FakeCurrentData()
+    result, trace = enrich_current_data(
+        _graph(),
+        client,
+        travel_date=date(2026, 8, 31),
+    )
+
+    hotel = result.evidence[0]
+    assert hotel["place_id"] == "hotel_qn_001"
+    assert hotel["name"] == "Trivago Hotel Name"
+    assert hotel["attributes"]["current"]["business_status"] == "operational"
+    assert hotel["attributes"]["hotel_availability"]["selected_window_index"] == 1
+    assert client.hotel_request is not None
+    assert client.hotel_request["stay_nights"] == 2
+    first_slot = result.itinerary[0]["slots"][0]
+    assert first_slot["hotel_availability"]["hotel_id"] == "hotel_qn_001"
+    assert first_slot["transport_to_next"]["recommended_mode"] == "drive"
+    assert first_slot["transport_to_next"]["provider"] == "here"
+    assert result.required_tools == []
+    assert trace["status"] == "completed"
+
+
+class FailingCurrentData:
+    def places(self, place_ids):
+        raise ConnectionError("offline")
+
+    def hotel_availability(self, **kwargs):
+        raise ConnectionError("offline")
+
+    def recommend_transport(self, **kwargs):
+        raise ConnectionError("offline")
+
+
+def test_enrichment_is_fail_soft_and_keeps_original_data() -> None:
+    original = _graph()
+    result, trace = enrich_current_data(
+        original,
+        FailingCurrentData(),
+        travel_date=date(2026, 8, 31),
+    )
+
+    assert result.evidence[0]["name"] == "Old Hotel"
+    assert result.itinerary[0]["slots"][0]["transport_to_next"]["status"] == "unavailable"
+    assert result.required_tools == original.required_tools
+    assert result.warnings == ["current_data_partial"]
+    assert trace["status"] == "unavailable"

@@ -12,11 +12,22 @@ _KB_VERSION_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # The process also consumes standard environment variables directly (for
+    # example OTEL_EXPORTER_OTLP_ENDPOINT). They belong to their respective
+    # SDKs rather than this application model and must not prevent startup.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     nextrip_be_host: str = "0.0.0.0"
     nextrip_be_port: int = 8000
-    nextrip_kb_base_url: str = "http://127.0.0.1:8010"
+    nextrip_kb_base_url: str = "http://127.0.0.1:8011"
+    current_data_enabled: bool = False
+    current_data_base_url: str = "http://127.0.0.1:8020"
+    current_data_api_key: str | None = None
+    current_data_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
     environment: Literal["local", "test", "production"] = "local"
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"

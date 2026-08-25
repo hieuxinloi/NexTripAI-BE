@@ -125,7 +125,10 @@ File:
 Minimum env:
 
 ```dotenv
-NEXTRIP_KB_BASE_URL=http://localhost:8010
+NEXTRIP_KB_BASE_URL=http://localhost:8011
+CURRENT_DATA_ENABLED=true
+CURRENT_DATA_BASE_URL=http://localhost:8020
+CURRENT_DATA_API_KEY=<same value as CURRENT_DATA_API_KEY on the KB runtime>
 WEATHER_PROVIDER=mock
 GOOGLE_API_KEY=your-google-ai-studio-key
 GEMINI_CONTEXT_MODEL=gemini-2.5-flash

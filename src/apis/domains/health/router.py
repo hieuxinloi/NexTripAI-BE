@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from src.apis.domains.chat.worker_pool import ChatWorkerPool
 from src.config import settings
 from src.infra.kb_client import KbClient
+from src.infra.current_data_client import CurrentDataClient
 from src.security.auth import Principal, require_admin
 
 router = APIRouter(tags=["health"])
@@ -102,11 +103,26 @@ async def ready(request: Request, response: Response) -> dict[str, object]:
         selected = None
     if selected is None:
         response.status_code = 503
+    current_data: dict[str, object] = {"status": "disabled"}
+    current_client: CurrentDataClient | None = request.app.state.current_data_client
+    if current_client is not None:
+        try:
+            current_data = await to_thread.run_sync(
+                current_client.readiness,
+                abandon_on_cancel=True,
+            )
+        except Exception as exc:
+            # Current data is a fail-soft enrichment. KB readiness remains the
+            # serving gate, while operators still see the degraded dependency.
+            current_data = {
+                "status": "not_ready",
+                "error": exc.__class__.__name__,
+            }
     return {
         "status": "ready" if selected else "not_ready",
         "service": "nextrip-be",
         "selected_kb_version": selected,
-        "dependencies": {"kb": dependency},
+        "dependencies": {"kb": dependency, "current_data": current_data},
     }
 
 
@@ -117,6 +133,11 @@ async def health(request: Request) -> dict[str, object]:
         "status": "ok",
         "service": "nextrip-be",
         "kb_base_url": settings().nextrip_kb_base_url,
+        "current_data": (
+            "enabled"
+            if request.app.state.current_data_client is not None
+            else "disabled"
+        ),
         "weather": "ready",
         "weather_provider": "open-meteo",
         "chat_store": request.app.state.chat_store.backend_name,

@@ -13,6 +13,10 @@ from src.apis.domains.chat.schemas import (
     EvidenceItem,
 )
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
+from src.core_ai.nextrip_agent.current_data import (
+    SupportsCurrentData,
+    enrich_current_data,
+)
 from src.core_ai.nextrip_agent.constants import (
     is_typed_kb_version,
     supports_structured_conversation_context,
@@ -136,6 +140,7 @@ def handle_chat(
     chat_history_limit: int = 8,
     conversation_contextualizer: SupportsConversationContextualization | None = None,
     user_profile_store: UserProfileStore | None = None,
+    current_data_client: SupportsCurrentData | None = None,
 ) -> ChatResponse:
     started_at = perf_counter()
     user_id = getattr(request, "user_id", None)
@@ -286,7 +291,12 @@ def handle_chat(
         longitude=request.longitude,
         conversation_context=kb_conversation_context,
     )
-    agent_result = orchestration.graph
+    effective_travel_date = request.travel_date or context.travel_date
+    agent_result, current_data_trace = enrich_current_data(
+        orchestration.graph,
+        current_data_client,
+        travel_date=effective_travel_date,
+    )
     weather = orchestration.weather
     if agent_result.error and agent_result.error.get("code") == "kb_version_mismatch":
         raise KnowledgeBaseVersionMismatchError(agent_result.error["message"])
@@ -318,6 +328,7 @@ def handle_chat(
         *agent_result.trace,
         orchestration.weather_trace,
         orchestration.planning_trace,
+        current_data_trace,
         synthesis.trace,
     ]
     logger.info(

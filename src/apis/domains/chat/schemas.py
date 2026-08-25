@@ -58,6 +58,43 @@ class Clarification(BaseModel):
     options: list[ClarificationOption] = Field(default_factory=list)
 
 
+class TransportToNext(BaseModel):
+    status: str
+    origin_place_id: str
+    destination_place_id: str
+    departure_time: str
+    recommended_mode: str | None = None
+    distance_meters: int | None = None
+    duration_seconds: int | None = None
+    provider: str | None = None
+    traffic_basis: str | None = None
+    traffic_aware: bool | None = None
+    degraded: bool = False
+    partial: bool = False
+    selection_reason: str | None = None
+    alternatives: list[dict[str, Any]] = Field(default_factory=list)
+    error_code: str | None = None
+
+
+class ItinerarySlot(BaseModel):
+    order: int = Field(ge=1)
+    start_time: str
+    end_time: str
+    place_id: str
+    name: str
+    city: str
+    entity_type: str
+    role: str | None = None
+    rationale: str | None = None
+    transport_to_next: TransportToNext | None = None
+    hotel_availability: dict[str, Any] | None = None
+
+
+class ItineraryDay(BaseModel):
+    day: int = Field(ge=1)
+    slots: list[ItinerarySlot]
+
+
 class ChatResponse(BaseModel):
     session_id: str
     message_id: str
@@ -69,7 +106,7 @@ class ChatResponse(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     recommendations: list[EvidenceItem] = Field(default_factory=list)
-    itinerary: list[dict[str, Any]] = Field(default_factory=list)
+    itinerary: list[ItineraryDay] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)

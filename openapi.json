@@ -1510,8 +1510,7 @@
           },
           "itinerary": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/ItineraryDay"
             },
             "type": "array",
             "title": "Itinerary"
@@ -2130,6 +2129,116 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "ItineraryDay": {
+        "properties": {
+          "day": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Day"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/ItinerarySlot"
+            },
+            "type": "array",
+            "title": "Slots"
+          }
+        },
+        "type": "object",
+        "required": [
+          "day",
+          "slots"
+        ],
+        "title": "ItineraryDay"
+      },
+      "ItinerarySlot": {
+        "properties": {
+          "order": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Order"
+          },
+          "start_time": {
+            "type": "string",
+            "title": "Start Time"
+          },
+          "end_time": {
+            "type": "string",
+            "title": "End Time"
+          },
+          "place_id": {
+            "type": "string",
+            "title": "Place Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "city": {
+            "type": "string",
+            "title": "City"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
+          "transport_to_next": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransportToNext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hotel_availability": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotel Availability"
+          }
+        },
+        "type": "object",
+        "required": [
+          "order",
+          "start_time",
+          "end_time",
+          "place_id",
+          "name",
+          "city",
+          "entity_type"
+        ],
+        "title": "ItinerarySlot"
       },
       "PersonalizationProfile": {
         "properties": {
@@ -2828,6 +2937,140 @@
           "title"
         ],
         "title": "SessionUpdateRequest"
+      },
+      "TransportToNext": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "origin_place_id": {
+            "type": "string",
+            "title": "Origin Place Id"
+          },
+          "destination_place_id": {
+            "type": "string",
+            "title": "Destination Place Id"
+          },
+          "departure_time": {
+            "type": "string",
+            "title": "Departure Time"
+          },
+          "recommended_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Mode"
+          },
+          "distance_meters": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance Meters"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "traffic_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Traffic Basis"
+          },
+          "traffic_aware": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Traffic Aware"
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          },
+          "partial": {
+            "type": "boolean",
+            "title": "Partial",
+            "default": false
+          },
+          "selection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection Reason"
+          },
+          "alternatives": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Alternatives"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "origin_place_id",
+          "destination_place_id",
+          "departure_time"
+        ],
+        "title": "TransportToNext"
       },
       "UserAdminUpdate": {
         "properties": {

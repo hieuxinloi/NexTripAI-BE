@@ -471,10 +471,7 @@ def _fallback_plan(
         term in normalized_message
         for term in ("nguoi lon tuoi", "nguoi cao tuoi", "nhe nhang", "khong qua nhieu")
     )
-    family_pace = any(term in normalized_message for term in ("tre nho", "gia dinh"))
     food_focus = any(term in normalized_message for term in ("am thuc", "an uong", "mon ngon", "quan an"))
-    beach_focus = any(term in normalized_message for term in ("bien", "bai tam", "beach", "ven bien"))
-    culture_focus = any(term in normalized_message for term in ("van hoa", "lich su", "bao tang", "di tich", "chua", "thap"))
     for day_number in range(1, duration_days + 1):
         specs: list[tuple[str, str, ItineraryRole, dict[str, Any] | None]] = []
         if day_number > 1 and hotel is not None:
