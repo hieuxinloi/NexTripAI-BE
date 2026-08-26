@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from src.core_ai.nextrip_agent.current_data import enrich_current_data
 from src.core_ai.nextrip_agent.schemas import AgentResult
@@ -186,3 +186,110 @@ def test_enrichment_is_fail_soft_and_keeps_original_data() -> None:
     assert result.required_tools == original.required_tools
     assert result.warnings == ["current_data_partial"]
     assert trace["status"] == "unavailable"
+
+
+class DirectRouteCurrentData:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.route_request: dict | None = None
+
+    def places(self, place_ids):
+        return {"items": []}
+
+    def hotel_availability(self, **kwargs):
+        raise AssertionError("hotel availability must not run for a route question")
+
+    def recommend_transport(self, **kwargs):
+        self.route_request = kwargs
+        if self.fail:
+            raise ConnectionError("traffic unavailable")
+        return {
+            "status": "recommended",
+            "recommended_mode": "two_wheeler",
+            "selection_reason": "balanced",
+            "degraded": False,
+            "partial": False,
+            "options": [
+                {
+                    "mode": "two_wheeler",
+                    "status": "eligible",
+                    "recommended": True,
+                    "rank": 1,
+                    "distance_meters": 129400,
+                    "duration_seconds": 8940,
+                    "reason_codes": ["route_available"],
+                    "route": {
+                        "route": {
+                            "provider": "here",
+                            "traffic_basis": "current",
+                            "traffic_aware": True,
+                        }
+                    },
+                }
+            ],
+        }
+
+
+def _direct_route_graph() -> AgentResult:
+    return AgentResult(
+        answer="",
+        answer_type="unsupported",
+        evidence=[
+            {
+                "place_id": "attr_qn_041",
+                "name": "Bảo tàng Quang Trung",
+                "entity_type": "place",
+                "attributes": {},
+            },
+            {
+                "place_id": "rest_qn_021",
+                "name": "GoGi House An Dương Vương Quy Nhơn",
+                "entity_type": "place",
+                "attributes": {},
+            },
+        ],
+        required_tools=["route", "transport"],
+    )
+
+
+def test_explicit_route_question_calls_traffic_on_demand() -> None:
+    client = DirectRouteCurrentData()
+
+    result, trace = enrich_current_data(
+        _direct_route_graph(),
+        client,
+        travel_date=None,
+    )
+
+    assert client.route_request is not None
+    assert client.route_request["origin_id"] == "attr_qn_041"
+    assert client.route_request["destination_id"] == "rest_qn_021"
+    assert isinstance(client.route_request["departure_time"], datetime)
+    route = result.evidence[0]["attributes"]["transport_to_destination"]
+    assert route["recommended_mode"] == "two_wheeler"
+    assert route["distance_meters"] == 129400
+    assert route["duration_seconds"] == 8940
+    assert route["provider"] == "here"
+    assert result.facts[0]["predicate"] == "route_recommendation"
+    assert "129.4 km" in result.facts[0]["value"]
+    assert "149 phút" in result.facts[0]["value"]
+    assert result.required_tools == []
+    assert trace["completed"] == ["places", "traffic"]
+    assert trace["route_count"] == 1
+
+
+def test_explicit_route_failure_keeps_tools_unresolved() -> None:
+    client = DirectRouteCurrentData(fail=True)
+
+    result, trace = enrich_current_data(
+        _direct_route_graph(),
+        client,
+        travel_date=None,
+    )
+
+    assert result.required_tools == ["route", "transport"]
+    assert result.facts == []
+    assert "transport_to_destination" not in result.evidence[0]["attributes"]
+    assert result.warnings == ["current_data_partial"]
+    assert trace["route_count"] == 0
+    assert trace["failures"] == ["traffic:ConnectionError"]

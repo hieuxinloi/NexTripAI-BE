@@ -49,14 +49,17 @@ def enrich_current_data(
 
     Current place fields are stored below ``evidence[].attributes.current``;
     hotel windows below ``attributes.hotel_availability``; and each computed
-    route below ``itinerary[].slots[].transport_to_next``. All additions are
-    optional and every remote failure preserves the original graph result.
+    route below ``itinerary[].slots[].transport_to_next``. A route explicitly
+    requested by the user is attached to the origin evidence as
+    ``attributes.transport_to_destination``. All additions are optional and
+    every remote failure preserves the original graph result.
     """
 
     if client is None:
         return graph, {"node": "current_data", "status": "disabled"}
 
     evidence = [dict(item) for item in graph.evidence]
+    facts = [dict(item) for item in graph.facts]
     itinerary = _copy_itinerary(graph.itinerary)
     place_ids = _canonical_place_ids(
         [item.get("place_id") for item in evidence]
@@ -105,7 +108,33 @@ def enrich_current_data(
 
     route_count = 0
     route_failures = 0
-    if itinerary and travel_date is not None:
+    route_requested = bool(
+        {"route", "transport"}.intersection(graph.required_tools)
+    )
+    if route_requested and not itinerary and len(place_ids) >= 2:
+        origin_id, destination_id = place_ids[:2]
+        departure = _on_demand_departure(travel_date)
+        try:
+            payload = client.recommend_transport(
+                origin_id=origin_id,
+                destination_id=destination_id,
+                departure_time=departure,
+            )
+            summary = _transport_summary(
+                payload,
+                origin_id=origin_id,
+                destination_id=destination_id,
+                departure=departure,
+            )
+            _require_usable_transport(summary)
+            evidence = _merge_direct_transport(evidence, origin_id, summary)
+            facts.append(_direct_transport_fact(summary))
+            route_count = 1
+            completed.append("traffic")
+        except Exception as exc:
+            route_failures = 1
+            failures.append(f"traffic:{exc.__class__.__name__}")
+    elif itinerary and travel_date is not None:
         itinerary, route_count, route_failures = _attach_transport(
             itinerary,
             client,
@@ -129,6 +158,7 @@ def enrich_current_data(
     updated = graph.model_copy(
         update={
             "evidence": evidence,
+            "facts": facts,
             "itinerary": itinerary,
             "required_tools": required_tools,
             "warnings": warnings,
@@ -333,6 +363,78 @@ def _departure_at(local_date: date, value: str) -> datetime:
     except ValueError:
         parsed = time(0, 0)
     return datetime.combine(local_date, parsed, tzinfo=_VIETNAM_TIMEZONE)
+
+
+def _on_demand_departure(travel_date: date | None) -> datetime:
+    now = datetime.now(_VIETNAM_TIMEZONE)
+    if travel_date is None or travel_date == now.date():
+        return now
+    return datetime.combine(travel_date, now.timetz(), tzinfo=_VIETNAM_TIMEZONE)
+
+
+def _require_usable_transport(summary: Mapping[str, Any]) -> None:
+    if (
+        summary.get("status") not in {"recommended", "available"}
+        or not summary.get("recommended_mode")
+        or summary.get("distance_meters") is None
+        or summary.get("duration_seconds") is None
+    ):
+        raise ValueError("traffic provider returned no usable recommendation")
+
+
+def _merge_direct_transport(
+    evidence: list[dict[str, Any]],
+    origin_id: str,
+    summary: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in evidence:
+        if str(item.get("place_id") or "") != origin_id:
+            result.append(item)
+            continue
+        attributes = dict(item.get("attributes") or {})
+        attributes["transport_to_destination"] = dict(summary)
+        result.append({**item, "attributes": attributes})
+    return result
+
+
+def _direct_transport_fact(summary: Mapping[str, Any]) -> dict[str, Any]:
+    mode = _transport_mode_label(str(summary["recommended_mode"]))
+    distance_km = float(summary["distance_meters"]) / 1000
+    duration_minutes = max(1, round(float(summary["duration_seconds"]) / 60))
+    provider = str(summary.get("provider") or "traffic provider").upper()
+    traffic_basis = (
+        "có xét giao thông hiện tại"
+        if summary.get("traffic_aware") is True
+        else "theo dữ liệu định tuyến hiện có"
+    )
+    value = (
+        f"Phương tiện đề xuất: {mode}; quãng đường theo đường thực tế: "
+        f"{distance_km:.1f} km; thời gian dự kiến: {duration_minutes} phút; "
+        f"nguồn định tuyến: {provider}, {traffic_basis}"
+    )
+    return {
+        "fact_id": (
+            "dynamic-route:"
+            f"{summary['origin_place_id']}:{summary['destination_place_id']}:"
+            f"{summary['departure_time']}"
+        ),
+        "subject_id": str(summary["origin_place_id"]),
+        "predicate": "route_recommendation",
+        "value": value,
+        "value_type": "string",
+        "confidence": 1.0,
+        "evidence_ids": [],
+    }
+
+
+def _transport_mode_label(mode: str) -> str:
+    return {
+        "walk": "đi bộ",
+        "bicycle": "xe đạp",
+        "two_wheeler": "xe máy",
+        "drive": "ô tô/taxi",
+    }.get(mode, mode)
 
 
 def _transport_summary(

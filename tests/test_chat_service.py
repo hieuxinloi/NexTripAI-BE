@@ -164,6 +164,81 @@ class FakeV8ItineraryClient(FakeKbClient):
         }
 
 
+class FakeV8RouteClient(FakeKbClient):
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        return {
+            "kb_version": "v8",
+            "answer_type": "unsupported",
+            "targets": [
+                {
+                    "target_id": "attr_qn_041",
+                    "kind": "place",
+                    "name": "Bảo tàng Quang Trung",
+                    "score": 1.0,
+                },
+                {
+                    "target_id": "rest_qn_021",
+                    "kind": "place",
+                    "name": "GoGi House An Dương Vương Quy Nhơn",
+                    "score": 1.0,
+                },
+            ],
+            "query_plan": {
+                "intent": "tool_required",
+                "required_tools": ["route", "transport"],
+            },
+            "required_tools": ["route", "transport"],
+            "missing_fields": [],
+            "trace": [],
+        }
+
+
+class FakeRouteCurrentData:
+    def __init__(self) -> None:
+        self.route_request: dict | None = None
+
+    def places(self, place_ids):
+        return {"items": []}
+
+    def hotel_availability(self, **kwargs):
+        raise AssertionError("hotel lookup is unrelated to a route request")
+
+    def recommend_transport(self, **kwargs):
+        self.route_request = kwargs
+        return {
+            "status": "recommended",
+            "recommended_mode": "two_wheeler",
+            "selection_reason": "balanced_generalized_duration",
+            "degraded": False,
+            "partial": False,
+            "options": [
+                {
+                    "mode": "two_wheeler",
+                    "status": "eligible",
+                    "recommended": True,
+                    "rank": 1,
+                    "distance_meters": 45600,
+                    "duration_seconds": 3893,
+                    "reason_codes": ["route_available"],
+                    "route": {
+                        "route": {
+                            "provider": "here",
+                            "traffic_basis": "current",
+                            "traffic_aware": True,
+                        }
+                    },
+                }
+            ],
+        }
+
+
 def test_structured_conversation_context_is_a_version_capability() -> None:
     assert supports_structured_conversation_context("v7") is False
     assert supports_structured_conversation_context("v8") is True
@@ -327,6 +402,38 @@ def test_v8_itinerary_context_and_warnings_survive_the_agent_boundary() -> None:
     assert result.itinerary[0]["slots"][0]["place_id"] == "attr_qn_001"
     assert result.warnings == ["itinerary_preferences_relaxed"]
     assert result.conversation_context["turn_count"] == 2
+
+
+def test_chat_route_question_calls_current_traffic_with_canonical_ids() -> None:
+    answer_generator = FakeAnswerGenerator("Đi xe máy, dự kiến khoảng 65 phút.")
+    current_data = FakeRouteCurrentData()
+
+    response = handle_chat(
+        ChatRequest(
+            message=(
+                "Từ Bảo tàng Quang Trung tới GoGi House nên di chuyển bằng gì "
+                "và thời gian di chuyển như nào?"
+            ),
+            session_id="route-on-demand",
+            kb_version="v8",
+        ),
+        FakeV8RouteClient(),
+        answer_generator,
+        current_data_client=current_data,
+    )
+
+    assert current_data.route_request is not None
+    assert current_data.route_request["origin_id"] == "attr_qn_041"
+    assert current_data.route_request["destination_id"] == "rest_qn_021"
+    assert response.required_tools == []
+    assert response.facts[0]["predicate"] == "route_recommendation"
+    assert response.evidence[0].attributes["transport_to_destination"][
+        "provider"
+    ] == "here"
+    assert response.answer == "Đi xe máy, dự kiến khoảng 65 phút."
+    assert answer_generator.calls[0]["facts"][0][
+        "predicate"
+    ] == "route_recommendation"
 
 
 def test_user_profile_reaches_v8_as_structured_personalization_context() -> None:
