@@ -354,10 +354,56 @@ def test_hybrid_planner_schedules_semantics_and_keeps_one_hotel_stay() -> None:
         (1, "check_in", "hotel_1"),
         (3, "check_out", "hotel_1"),
     ]
+    first_day_roles = [slot["role"] for slot in result.itinerary[0]["slots"]]
+    assert first_day_roles == ["activity", "meal", "check_in", "cafe_break"]
+    check_in = next(
+        slot for slot in result.itinerary[0]["slots"] if slot["role"] == "check_in"
+    )
+    check_out = next(
+        slot for slot in result.itinerary[2]["slots"] if slot["role"] == "check_out"
+    )
+    assert check_in["start_time"] == "14:00"
+    assert check_out["end_time"] <= "12:00"
     assert all(
         any(slot["role"] == "activity" for slot in day["slots"])
         for day in result.itinerary
     )
+
+
+def test_hybrid_scheduler_prefers_hotel_policy_over_default_times() -> None:
+    candidates = _candidates()
+    hotel = next(item for item in candidates if item["entity_type"] == "hotel")
+    hotel["attributes"].update(
+        {
+            "check_in_time": "15:00",
+            "check_out_time": "09:00",
+        }
+    )
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=FakeSemanticPlanner(),
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    check_in = next(
+        slot for slot in result.itinerary[0]["slots"] if slot["role"] == "check_in"
+    )
+    check_out = next(
+        slot for slot in result.itinerary[2]["slots"] if slot["role"] == "check_out"
+    )
+    assert trace["planner"] == "gemini_hybrid"
+    assert check_in["start_time"] == "15:00"
+    assert check_out["end_time"] <= "09:00"
 
 
 def test_hybrid_scheduler_uses_injected_policy_instead_of_fixed_clock_template() -> (

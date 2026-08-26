@@ -143,6 +143,16 @@ class PlanningPolicy(BaseModel):
     evening_start_minutes: int = Field(default=18 * 60 + 30, ge=0, lt=24 * 60)
     transition_buffer_minutes: int = Field(default=15, ge=0, le=120)
     hotel_transition_minutes: int = Field(default=30, ge=10, le=180)
+    default_hotel_check_in_minutes: int = Field(
+        default=14 * 60,
+        ge=0,
+        lt=24 * 60,
+    )
+    default_hotel_check_out_minutes: int = Field(
+        default=12 * 60,
+        gt=0,
+        le=24 * 60,
+    )
     activity_duration_minutes: int = Field(default=90, ge=30, le=360)
     meal_duration_minutes: int = Field(default=75, ge=30, le=240)
     cafe_duration_minutes: int = Field(default=60, ge=20, le=180)
@@ -581,6 +591,7 @@ def _validate_plan(
         duration_days=duration_days,
         duration_nights=duration_nights,
         require_full_coverage=require_full_coverage,
+        policy=policy,
     )
 
 
@@ -591,6 +602,7 @@ def _validate_hotel_lifecycle(
     duration_days: int,
     duration_nights: int,
     require_full_coverage: bool,
+    policy: PlanningPolicy,
 ) -> None:
     if duration_nights <= 0 or not any(
         item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
@@ -613,11 +625,30 @@ def _validate_hotel_lifecycle(
         raise ValueError("itinerary_hotel_check_out_count_invalid")
     if check_ins[0][0] != 1:
         raise ValueError("itinerary_hotel_check_in_day_invalid")
+    stay_hotel = next(
+        item
+        for item in candidates
+        if str(item.get("place_id")) == check_ins[0][1].place_id
+    )
+    check_in_earliest = _hotel_policy_minutes(
+        stay_hotel,
+        field="check_in_time",
+        fallback=policy.default_hotel_check_in_minutes,
+    )
+    if _minutes(check_ins[0][1].start_time) < check_in_earliest:
+        raise ValueError("itinerary_hotel_check_in_before_policy")
     if duration_days > 1:
         if check_outs[0][0] != duration_days:
             raise ValueError("itinerary_hotel_check_out_day_invalid")
         if check_ins[0][1].place_id != check_outs[0][1].place_id:
             raise ValueError("itinerary_hotel_stay_identity_mismatch")
+        check_out_deadline = _hotel_policy_minutes(
+            stay_hotel,
+            field="check_out_time",
+            fallback=policy.default_hotel_check_out_minutes,
+        )
+        if _minutes(check_outs[0][1].end_time) > check_out_deadline:
+            raise ValueError("itinerary_hotel_check_out_after_policy")
     elif require_full_coverage and check_outs:
         raise ValueError("itinerary_same_day_hotel_checkout_invalid")
 
@@ -1002,10 +1033,30 @@ def _schedule_semantic_plan(
             and duration_days > 1
             and semantic_day.day == duration_days
         ):
-            checkout_end = cursor + policy.hotel_transition_minutes
+            checkout_deadline = _hotel_policy_minutes(
+                stay_hotel,
+                field="check_out_time",
+                fallback=policy.default_hotel_check_out_minutes,
+            )
+            has_morning_assignment = any(
+                assignment.preferred_period
+                in {PreferredPeriod.MORNING, PreferredPeriod.FLEXIBLE}
+                for assignment in semantic_day.assignments
+            )
+            checkout_start = (
+                policy.day_start_minutes
+                if has_morning_assignment
+                else max(
+                    policy.day_start_minutes,
+                    checkout_deadline - policy.hotel_transition_minutes,
+                )
+            )
+            checkout_end = checkout_start + policy.hotel_transition_minutes
+            if checkout_end > checkout_deadline:
+                raise ValueError("hotel_check_out_not_schedulable")
             stops.append(
                 PlannedStop(
-                    start_time=_clock(cursor),
+                    start_time=_clock(checkout_start),
                     end_time=_clock(checkout_end),
                     place_id=str(stay_hotel["place_id"]),
                     role=ItineraryRole.CHECK_OUT,
@@ -1013,6 +1064,45 @@ def _schedule_semantic_plan(
                 )
             )
             cursor = checkout_end
+
+        checkin_pending = stay_hotel is not None and semantic_day.day == 1
+
+        def append_checkin() -> None:
+            nonlocal cursor, checkin_pending
+            if not checkin_pending or stay_hotel is None:
+                return
+            cursor = _ready_after_previous_stop(
+                stops,
+                destination_id=str(stay_hotel["place_id"]),
+                local_date=local_date,
+                route_provider=route_provider,
+                policy=policy,
+            )
+            checkin_start = max(
+                cursor,
+                _hotel_policy_minutes(
+                    stay_hotel,
+                    field="check_in_time",
+                    fallback=policy.default_hotel_check_in_minutes,
+                ),
+            )
+            checkin_end = checkin_start + policy.hotel_transition_minutes
+            if checkin_end > policy.day_end_minutes:
+                raise ValueError("hotel_check_in_not_schedulable")
+            stops.append(
+                PlannedStop(
+                    start_time=_clock(checkin_start),
+                    end_time=_clock(checkin_end),
+                    place_id=str(stay_hotel["place_id"]),
+                    role=ItineraryRole.CHECK_IN,
+                    rationale=(
+                        "Nhận phòng một lần cho toàn bộ kỳ lưu trú; giờ mặc định "
+                        "chỉ dùng khi nguồn khách sạn chưa có chính sách."
+                    ),
+                )
+            )
+            cursor = checkin_end
+            checkin_pending = False
 
         for assignment in semantic_day.assignments:
             role = ItineraryRole(assignment.role.value)
@@ -1026,6 +1116,12 @@ def _schedule_semantic_plan(
             period_start, period_end = _period_window(
                 assignment.preferred_period, policy
             )
+            if assignment.preferred_period in {
+                PreferredPeriod.AFTERNOON,
+                PreferredPeriod.DINNER,
+                PreferredPeriod.EVENING,
+            }:
+                append_checkin()
             duration = _visit_duration_minutes(candidate, role, policy)
             cursor = _ready_after_previous_stop(
                 stops,
@@ -1061,36 +1157,7 @@ def _schedule_semantic_plan(
             )
             cursor = end
 
-        if stay_hotel is not None and semantic_day.day == 1:
-            cursor = _ready_after_previous_stop(
-                stops,
-                destination_id=str(stay_hotel["place_id"]),
-                local_date=local_date,
-                route_provider=route_provider,
-                policy=policy,
-            )
-            checkin = _fit_opening_window(
-                stay_hotel,
-                ready_at=cursor,
-                duration=policy.hotel_transition_minutes,
-                period_start=policy.day_start_minutes,
-                period_end=policy.day_end_minutes,
-                strict_period=False,
-                local_date=local_date,
-                policy=policy,
-            )
-            if checkin is None:
-                raise ValueError("hotel_check_in_not_schedulable")
-            checkin_start, checkin_end = checkin
-            stops.append(
-                PlannedStop(
-                    start_time=_clock(checkin_start),
-                    end_time=_clock(checkin_end),
-                    place_id=str(stay_hotel["place_id"]),
-                    role=ItineraryRole.CHECK_IN,
-                    rationale="Nhận phòng một lần cho toàn bộ kỳ lưu trú.",
-                )
-            )
+        append_checkin()
         if not stops:
             raise ValueError("semantic_itinerary_day_empty")
         planned_days.append(PlannedDay(day=semantic_day.day, stops=stops))
@@ -1460,6 +1527,25 @@ def _opening_time_minutes(value: Any, *, closing: bool = False) -> int | None:
     if closing and hours == 0 and minutes == 0:
         return 24 * 60
     return hours * 60 + minutes
+
+
+def _hotel_policy_minutes(
+    candidate: dict[str, Any],
+    *,
+    field: str,
+    fallback: int,
+) -> int:
+    attributes = candidate.get("attributes") or {}
+    sources = [attributes]
+    for key in ("hotel_policy", "current"):
+        nested = attributes.get(key)
+        if isinstance(nested, dict):
+            sources.insert(0, nested)
+    for source in sources:
+        parsed = _opening_time_minutes(source.get(field))
+        if parsed is not None:
+            return parsed
+    return fallback
 
 
 def _visit_duration_minutes(
