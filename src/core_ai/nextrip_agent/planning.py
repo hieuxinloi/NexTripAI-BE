@@ -147,6 +147,7 @@ class PlanningPolicy(BaseModel):
     meal_duration_minutes: int = Field(default=75, ge=30, le=240)
     cafe_duration_minutes: int = Field(default=60, ge=20, le=180)
     rest_duration_minutes: int = Field(default=60, ge=20, le=240)
+    max_unrequested_anchor_distance_km: float = Field(default=30.0, gt=0, le=200)
 
 
 DEFAULT_PLANNING_POLICY = PlanningPolicy()
@@ -208,7 +209,9 @@ PLANNABLE_ENTITY_TYPES = frozenset(
 )
 
 
-def is_itinerary_request(message: str, query_plan: dict[str, Any] | None = None) -> bool:
+def is_itinerary_request(
+    message: str, query_plan: dict[str, Any] | None = None
+) -> bool:
     if (query_plan or {}).get("intent") == "plan_candidates":
         return True
     normalized = normalize_text(message)
@@ -248,7 +251,15 @@ def planning_agent_node(
     # nightlife result should never re-enter an itinerary that explicitly
     # rejects bars or clubs merely because it scored highly in retrieval.
     normalized_message = normalize_text(message)
-    if any(term in normalized_message for term in ("khong bar", "khong club", "khong muon di bar", "khong muon di club")):
+    if any(
+        term in normalized_message
+        for term in (
+            "khong bar",
+            "khong club",
+            "khong muon di bar",
+            "khong muon di club",
+        )
+    ):
         candidates = [
             item for item in candidates if item.get("entity_type") != "nightlife"
         ]
@@ -264,6 +275,15 @@ def planning_agent_node(
     source = "deterministic_fallback"
     plan: ItineraryPlan | None = None
     planner_candidates = _weather_safe_candidates(candidates, weather_forecast)
+    planner_candidates, remote_candidate_count = _geographically_coherent_candidates(
+        planner_candidates,
+        message=message,
+        latitude=latitude,
+        longitude=longitude,
+        policy=policy,
+    )
+    if remote_candidate_count:
+        planning_warnings.append(f"remote_candidates_excluded:{remote_candidate_count}")
     safe_activity_count = sum(
         item.get("entity_type") in {"attraction", "nightlife"}
         for item in planner_candidates
@@ -277,9 +297,7 @@ def planning_agent_node(
         planning_warnings.append("no_plannable_candidates")
         updated = graph.model_copy(
             update={
-                "warnings": list(
-                    dict.fromkeys([*graph.warnings, *planning_warnings])
-                )
+                "warnings": list(dict.fromkeys([*graph.warnings, *planning_warnings]))
             }
         )
         return updated, {
@@ -299,9 +317,7 @@ def planning_agent_node(
                 "duration_days": duration_days,
                 "duration_nights": duration_nights,
                 "candidates": planner_candidates,
-                "weather": [
-                    item.model_dump(mode="json") for item in weather_forecast
-                ],
+                "weather": [item.model_dump(mode="json") for item in weather_forecast],
                 "latitude": latitude,
                 "longitude": longitude,
                 "personalization_context": personalization_context,
@@ -328,13 +344,12 @@ def planning_agent_node(
                 duration_days=duration_days,
                 duration_nights=duration_nights,
                 weather_forecast=weather_forecast,
+                travel_date=travel_date,
                 policy=policy,
             )
             plan = proposed
         except Exception as exc:
-            planning_warnings.append(
-                f"planning_fallback:{exc.__class__.__name__}"
-            )
+            planning_warnings.append(f"planning_fallback:{exc.__class__.__name__}")
             logger.warning(
                 "Planning agent fallback city={} error_type={} reason={}",
                 resolved_city,
@@ -345,7 +360,7 @@ def planning_agent_node(
     if plan is None:
         try:
             plan = _fallback_plan(
-                candidates,
+                planner_candidates,
                 duration_days=duration_days,
                 duration_nights=duration_nights,
                 weather=_planning_weather(weather_forecast),
@@ -364,6 +379,7 @@ def planning_agent_node(
                 duration_nights=duration_nights,
                 weather_forecast=weather_forecast,
                 require_full_coverage=False,
+                travel_date=travel_date,
                 policy=policy,
             )
         except Exception as exc:
@@ -439,16 +455,21 @@ def _duration_nights(message: str, duration_days: int) -> int:
 
 
 def _single_candidate_city(candidates: list[dict[str, Any]]) -> str | None:
-    cities = list(dict.fromkeys(str(item.get("city")) for item in candidates if item.get("city")))
+    cities = list(
+        dict.fromkeys(str(item.get("city")) for item in candidates if item.get("city"))
+    )
     return cities[0] if len(cities) == 1 else None
 
 
-def _city_candidates(candidates: list[dict[str, Any]], city: str) -> list[dict[str, Any]]:
+def _city_candidates(
+    candidates: list[dict[str, Any]], city: str
+) -> list[dict[str, Any]]:
     expected = normalize_text(city)
     return [
         item
         for item in candidates
-        if item.get("place_id") and normalize_text(str(item.get("city") or "")) == expected
+        if item.get("place_id")
+        and normalize_text(str(item.get("city") or "")) == expected
     ]
 
 
@@ -461,6 +482,7 @@ def _validate_plan(
     duration_nights: int,
     weather_forecast: list[WeatherAssessment],
     require_full_coverage: bool = True,
+    travel_date: date | None = None,
     policy: PlanningPolicy = DEFAULT_PLANNING_POLICY,
 ) -> None:
     if [day.day for day in plan.days] != list(range(1, duration_days + 1)):
@@ -469,15 +491,13 @@ def _validate_plan(
     expected_city = normalize_text(city)
     roles: list[ItineraryRole] = []
     role_locations: list[tuple[int, PlannedStop]] = []
+    used_non_hotel_places: set[str] = set()
     activity_candidate_count = sum(
-        item.get("entity_type") in {"attraction", "nightlife"}
-        for item in candidates
+        item.get("entity_type") in {"attraction", "nightlife"} for item in candidates
     )
     for day in plan.days:
         day_weather = (
-            weather_forecast[day.day - 1]
-            if day.day <= len(weather_forecast)
-            else None
+            weather_forecast[day.day - 1] if day.day <= len(weather_forecast) else None
         )
         previous_end = -1
         day_roles: list[ItineraryRole] = []
@@ -487,6 +507,10 @@ def _validate_plan(
                 raise ValueError("itinerary_contains_ungrounded_place")
             if normalize_text(str(candidate.get("city") or "")) != expected_city:
                 raise ValueError("itinerary_city_scope_violation")
+            if candidate.get("entity_type") != "hotel":
+                if stop.place_id in used_non_hotel_places:
+                    raise ValueError("itinerary_repeats_place")
+                used_non_hotel_places.add(stop.place_id)
             start = _minutes(stop.start_time)
             end = _minutes(stop.end_time)
             if (
@@ -498,7 +522,16 @@ def _validate_plan(
                 raise ValueError("itinerary_time_overlap")
             previous_end = end
             _validate_role(stop.role, str(candidate.get("entity_type") or ""))
-            _validate_opening_window(stop, candidate)
+            _validate_opening_window(
+                stop,
+                candidate,
+                local_date=(
+                    travel_date + timedelta(days=day.day - 1)
+                    if travel_date is not None
+                    else None
+                ),
+                policy=policy,
+            )
             if (
                 day_weather is not None
                 and day_weather.suitability == "unsuitable"
@@ -526,14 +559,17 @@ def _validate_plan(
         and ItineraryRole.ACTIVITY not in roles
     ):
         raise ValueError("itinerary_activity_missing")
-    if require_full_coverage and ItineraryRole.CAFE_BREAK not in roles and ItineraryRole.REST not in roles:
+    if (
+        require_full_coverage
+        and ItineraryRole.CAFE_BREAK not in roles
+        and ItineraryRole.REST not in roles
+    ):
         raise ValueError("itinerary_rest_missing")
     if (
         require_full_coverage
         and duration_nights > 0
         and any(
-            item.get("entity_type") == "hotel"
-            and _hotel_candidate_is_selectable(item)
+            item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
             for item in candidates
         )
         and ItineraryRole.CHECK_IN not in roles
@@ -557,8 +593,7 @@ def _validate_hotel_lifecycle(
     require_full_coverage: bool,
 ) -> None:
     if duration_nights <= 0 or not any(
-        item.get("entity_type") == "hotel"
-        and _hotel_candidate_is_selectable(item)
+        item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
         for item in candidates
     ):
         return
@@ -600,17 +635,19 @@ def _validate_role(role: ItineraryRole, entity_type: str) -> None:
         raise ValueError(f"invalid_role_entity_type:{role}:{entity_type}")
 
 
-def _validate_opening_window(stop: PlannedStop, candidate: dict[str, Any]) -> None:
-    attributes = candidate.get("attributes") or {}
-    opens = attributes.get("opening_hours_open")
-    closes = attributes.get("opening_hours_close")
-    if not isinstance(opens, str) or not isinstance(closes, str):
-        return
-    if not re.fullmatch(r"\d{1,2}:\d{2}", opens) or not re.fullmatch(r"\d{1,2}:\d{2}", closes):
-        return
-    opening = _minutes(opens)
-    closing = 24 * 60 if closes in {"00:00", "24:00"} else _minutes(closes)
-    if _minutes(stop.start_time) < opening or _minutes(stop.end_time) > closing:
+def _validate_opening_window(
+    stop: PlannedStop,
+    candidate: dict[str, Any],
+    *,
+    local_date: date | None,
+    policy: PlanningPolicy,
+) -> None:
+    start = _minutes(stop.start_time)
+    end = _minutes(stop.end_time)
+    if not any(
+        start >= opening and end <= closing
+        for opening, closing in _opening_windows(candidate, local_date, policy)
+    ):
         raise ValueError("itinerary_outside_opening_hours")
 
 
@@ -634,6 +671,114 @@ def _weather_safe_candidates(
         if item.get("entity_type") not in {"attraction", "nightlife"}
         or not _is_explicitly_outdoor(item)
     ]
+
+
+def _geographically_coherent_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    message: str,
+    latitude: float | None,
+    longitude: float | None,
+    policy: PlanningPolicy,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep a plan inside one practical travel cluster, not just one city label."""
+
+    anchor: tuple[float, float] | None = None
+    if _valid_coordinate_pair(latitude, longitude):
+        anchor = (float(latitude), float(longitude))
+    else:
+        urban_points = [
+            coordinates
+            for item in candidates
+            if item.get("entity_type") in {"hotel", "restaurant", "cafe", "nightlife"}
+            and (coordinates := _candidate_coordinates(item)) is not None
+        ]
+        if len(urban_points) >= 2:
+            anchor = (
+                _median([point[0] for point in urban_points]),
+                _median([point[1] for point in urban_points]),
+            )
+        else:
+            all_points = [
+                coordinates
+                for item in candidates
+                if (coordinates := _candidate_coordinates(item)) is not None
+            ]
+            if len(all_points) >= 3:
+                anchor = (
+                    _median([point[0] for point in all_points]),
+                    _median([point[1] for point in all_points]),
+                )
+
+    if anchor is None:
+        return candidates, 0
+
+    normalized_message = normalize_text(message)
+    retained: list[dict[str, Any]] = []
+    excluded = 0
+    for candidate in candidates:
+        coordinates = _candidate_coordinates(candidate)
+        if coordinates is None:
+            retained.append(candidate)
+            continue
+        candidate_name = normalize_text(str(candidate.get("name") or ""))
+        explicitly_requested = (
+            len(candidate_name) >= 4 and candidate_name in normalized_message
+        )
+        if (
+            _haversine_km(anchor, coordinates)
+            > policy.max_unrequested_anchor_distance_km
+            and not explicitly_requested
+        ):
+            excluded += 1
+            continue
+        retained.append(candidate)
+    return retained, excluded
+
+
+def _candidate_coordinates(
+    candidate: dict[str, Any],
+) -> tuple[float, float] | None:
+    attributes = candidate.get("attributes") or {}
+    latitude = attributes.get("lat", attributes.get("latitude"))
+    longitude = attributes.get("lng", attributes.get("longitude"))
+    if not _valid_coordinate_pair(latitude, longitude):
+        return None
+    return float(latitude), float(longitude)
+
+
+def _valid_coordinate_pair(latitude: Any, longitude: Any) -> bool:
+    return (
+        isinstance(latitude, (int, float))
+        and not isinstance(latitude, bool)
+        and isinstance(longitude, (int, float))
+        and not isinstance(longitude, bool)
+        and -90 <= float(latitude) <= 90
+        and -180 <= float(longitude) <= 180
+    )
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
+def _haversine_km(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+) -> float:
+    radius_km = 6371.0088
+    lat1, lat2 = math.radians(origin[0]), math.radians(destination[0])
+    delta_lat = lat2 - lat1
+    delta_lon = math.radians(destination[1] - origin[1])
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    return radius_km * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
 def _fallback_plan(
@@ -670,24 +815,49 @@ def _fallback_plan(
         for entity_type in ("attraction", "restaurant", "cafe", "hotel", "nightlife")
     }
     activity_pool = [*pools["attraction"], *pools["nightlife"]]
-    indexes = {entity_type: 0 for entity_type in pools}
-    activity_index = 0
+    used_place_ids: set[str] = set()
 
-    def take(entity_type: str, *, required: bool = False) -> dict[str, Any] | None:
-        values = pools[entity_type]
-        index = indexes[entity_type]
-        if index < len(values):
-            indexes[entity_type] += 1
-            return values[index]
-        return values[0] if required and values else None
+    def take(
+        entity_type: str,
+        *,
+        role: ItineraryRole,
+        period: PreferredPeriod,
+        local_date: date | None,
+    ) -> dict[str, Any] | None:
+        for candidate in pools[entity_type]:
+            place_id = str(candidate["place_id"])
+            if place_id in used_place_ids:
+                continue
+            if _candidate_supports_period(
+                candidate,
+                role=role,
+                period=period,
+                local_date=local_date,
+                policy=policy,
+            ):
+                used_place_ids.add(place_id)
+                return candidate
+        return None
 
-    def take_activity(*, required: bool = False) -> dict[str, Any] | None:
-        nonlocal activity_index
-        if activity_index < len(activity_pool):
-            value = activity_pool[activity_index]
-            activity_index += 1
-            return value
-        return activity_pool[0] if required and activity_pool else None
+    def take_activity(
+        *,
+        period: PreferredPeriod,
+        local_date: date | None,
+    ) -> dict[str, Any] | None:
+        for value in activity_pool:
+            place_id = str(value["place_id"])
+            if place_id in used_place_ids:
+                continue
+            if _candidate_supports_period(
+                value,
+                role=ItineraryRole.ACTIVITY,
+                period=period,
+                local_date=local_date,
+                policy=policy,
+            ):
+                used_place_ids.add(place_id)
+                return value
+        return None
 
     selectable_hotels = [
         item for item in pools["hotel"] if _hotel_candidate_is_selectable(item)
@@ -696,6 +866,11 @@ def _fallback_plan(
     semantic_days: list[SemanticDay] = []
     for day_number in range(1, duration_days + 1):
         assignments: list[SemanticAssignment] = []
+        local_date = (
+            travel_date + timedelta(days=day_number - 1)
+            if travel_date is not None
+            else None
+        )
 
         def add(
             item: dict[str, Any] | None,
@@ -712,17 +887,63 @@ def _fallback_plan(
                     )
                 )
 
-        add(take_activity(required=True), ItineraryRole.ACTIVITY, PreferredPeriod.MORNING)
-        add(take("restaurant", required=True), ItineraryRole.MEAL, PreferredPeriod.LUNCH)
+        add(
+            take_activity(
+                period=PreferredPeriod.MORNING,
+                local_date=local_date,
+            ),
+            ItineraryRole.ACTIVITY,
+            PreferredPeriod.MORNING,
+        )
+        add(
+            take(
+                "restaurant",
+                role=ItineraryRole.MEAL,
+                period=PreferredPeriod.LUNCH,
+                local_date=local_date,
+            ),
+            ItineraryRole.MEAL,
+            PreferredPeriod.LUNCH,
+        )
         # Preserve enough primary activities for later days before adding an
         # optional second stop to the current day.
         remaining_days = duration_days - day_number
-        remaining_unique_activities = len(activity_pool) - activity_index
+        remaining_unique_activities = sum(
+            str(item["place_id"]) not in used_place_ids for item in activity_pool
+        )
         if remaining_unique_activities > remaining_days:
-            add(take_activity(), ItineraryRole.ACTIVITY, PreferredPeriod.AFTERNOON)
-        add(take("cafe", required=True), ItineraryRole.CAFE_BREAK, PreferredPeriod.AFTERNOON)
-        if len(pools["restaurant"]) - indexes["restaurant"] > remaining_days:
-            add(take("restaurant"), ItineraryRole.MEAL, PreferredPeriod.DINNER)
+            add(
+                take_activity(
+                    period=PreferredPeriod.AFTERNOON,
+                    local_date=local_date,
+                ),
+                ItineraryRole.ACTIVITY,
+                PreferredPeriod.AFTERNOON,
+            )
+        add(
+            take(
+                "cafe",
+                role=ItineraryRole.CAFE_BREAK,
+                period=PreferredPeriod.AFTERNOON,
+                local_date=local_date,
+            ),
+            ItineraryRole.CAFE_BREAK,
+            PreferredPeriod.AFTERNOON,
+        )
+        remaining_restaurants = sum(
+            str(item["place_id"]) not in used_place_ids for item in pools["restaurant"]
+        )
+        if remaining_restaurants > remaining_days:
+            add(
+                take(
+                    "restaurant",
+                    role=ItineraryRole.MEAL,
+                    period=PreferredPeriod.DINNER,
+                    local_date=local_date,
+                ),
+                ItineraryRole.MEAL,
+                PreferredPeriod.DINNER,
+            )
         if not assignments and hotel is not None:
             add(hotel, ItineraryRole.REST, PreferredPeriod.AFTERNOON)
         if assignments:
@@ -730,7 +951,9 @@ def _fallback_plan(
 
     semantic = SemanticItineraryPlan(
         days=semantic_days,
-        stay=SemanticStay(hotel_id=str(hotel["place_id"])) if hotel is not None else None,
+        stay=SemanticStay(hotel_id=str(hotel["place_id"]))
+        if hotel is not None
+        else None,
         summary="Lịch trình cân bằng từ các địa điểm đã xác minh.",
     )
     return _schedule_semantic_plan(
@@ -739,7 +962,7 @@ def _fallback_plan(
         duration_days=duration_days,
         duration_nights=duration_nights,
         policy=policy,
-        allow_repeated_places=True,
+        allow_repeated_places=False,
         route_provider=route_provider,
         travel_date=travel_date,
     )
@@ -774,7 +997,11 @@ def _schedule_semantic_plan(
             if travel_date is not None
             else None
         )
-        if stay_hotel is not None and duration_days > 1 and semantic_day.day == duration_days:
+        if (
+            stay_hotel is not None
+            and duration_days > 1
+            and semantic_day.day == duration_days
+        ):
             checkout_end = cursor + policy.hotel_transition_minutes
             stops.append(
                 PlannedStop(
@@ -796,8 +1023,9 @@ def _schedule_semantic_plan(
             if not allow_repeated_places and assignment.place_id in used:
                 raise ValueError("semantic_itinerary_repeats_place")
             used.add(assignment.place_id)
-            period_start, period_end = _period_window(assignment.preferred_period, policy)
-            opening, closing = _opening_window(candidate, policy)
+            period_start, period_end = _period_window(
+                assignment.preferred_period, policy
+            )
             duration = _visit_duration_minutes(candidate, role, policy)
             cursor = _ready_after_previous_stop(
                 stops,
@@ -806,20 +1034,22 @@ def _schedule_semantic_plan(
                 route_provider=route_provider,
                 policy=policy,
             )
-            start = max(cursor, period_start, opening)
-            latest_end = min(policy.day_end_minutes, closing)
-            # The preferred period is soft, but lunch/dinner remain bounded so
-            # a meal cannot silently drift into a different part of the day.
-            if assignment.preferred_period in {
-                PreferredPeriod.LUNCH,
-                PreferredPeriod.DINNER,
-            }:
-                latest_end = min(latest_end, period_end)
-            end = start + duration
-            if end > latest_end:
+            scheduled = _fit_opening_window(
+                candidate,
+                ready_at=cursor,
+                duration=duration,
+                period_start=period_start,
+                period_end=period_end,
+                strict_period=assignment.preferred_period
+                in {PreferredPeriod.LUNCH, PreferredPeriod.DINNER},
+                local_date=local_date,
+                policy=policy,
+            )
+            if scheduled is None:
                 raise ValueError(
                     f"semantic_assignment_not_schedulable:{assignment.place_id}"
                 )
+            start, end = scheduled
             stops.append(
                 PlannedStop(
                     start_time=_clock(start),
@@ -832,7 +1062,6 @@ def _schedule_semantic_plan(
             cursor = end
 
         if stay_hotel is not None and semantic_day.day == 1:
-            opening, closing = _opening_window(stay_hotel, policy)
             cursor = _ready_after_previous_stop(
                 stops,
                 destination_id=str(stay_hotel["place_id"]),
@@ -840,10 +1069,19 @@ def _schedule_semantic_plan(
                 route_provider=route_provider,
                 policy=policy,
             )
-            checkin_start = max(cursor, opening)
-            checkin_end = checkin_start + policy.hotel_transition_minutes
-            if checkin_end > min(closing, policy.day_end_minutes):
+            checkin = _fit_opening_window(
+                stay_hotel,
+                ready_at=cursor,
+                duration=policy.hotel_transition_minutes,
+                period_start=policy.day_start_minutes,
+                period_end=policy.day_end_minutes,
+                strict_period=False,
+                local_date=local_date,
+                policy=policy,
+            )
+            if checkin is None:
                 raise ValueError("hotel_check_in_not_schedulable")
+            checkin_start, checkin_end = checkin
             stops.append(
                 PlannedStop(
                     start_time=_clock(checkin_start),
@@ -971,7 +1209,9 @@ def _resolve_stay_hotel(
     if not hotels:
         return None
     if semantic.stay is None:
-        return next((item for item in hotels if _hotel_candidate_is_selectable(item)), None)
+        return next(
+            (item for item in hotels if _hotel_candidate_is_selectable(item)), None
+        )
     selected = next(
         (item for item in hotels if item.get("place_id") == semantic.stay.hotel_id),
         None,
@@ -1026,27 +1266,200 @@ def _period_window(
     return windows[period]
 
 
-def _opening_window(
+def _candidate_supports_period(
     candidate: dict[str, Any],
+    *,
+    role: ItineraryRole,
+    period: PreferredPeriod,
+    local_date: date | None,
     policy: PlanningPolicy,
-) -> tuple[int, int]:
+) -> bool:
+    period_start, period_end = _period_window(period, policy)
+    duration = _visit_duration_minutes(candidate, role, policy)
+    return (
+        _fit_opening_window(
+            candidate,
+            ready_at=period_start,
+            duration=duration,
+            period_start=period_start,
+            period_end=period_end,
+            strict_period=period in {PreferredPeriod.LUNCH, PreferredPeriod.DINNER},
+            local_date=local_date,
+            policy=policy,
+        )
+        is not None
+    )
+
+
+def _fit_opening_window(
+    candidate: dict[str, Any],
+    *,
+    ready_at: int,
+    duration: int,
+    period_start: int,
+    period_end: int,
+    strict_period: bool,
+    local_date: date | None,
+    policy: PlanningPolicy,
+) -> tuple[int, int] | None:
+    for opening, closing in _opening_windows(candidate, local_date, policy):
+        start = max(ready_at, period_start, opening)
+        latest_end = min(policy.day_end_minutes, closing)
+        if strict_period:
+            latest_end = min(latest_end, period_end)
+        end = start + duration
+        if end <= latest_end:
+            return start, end
+    return None
+
+
+def _opening_windows(
+    candidate: dict[str, Any],
+    local_date: date | None,
+    policy: PlanningPolicy,
+) -> list[tuple[int, int]]:
     attributes = dict(candidate.get("attributes") or {})
     current = attributes.get("current")
-    if isinstance(current, dict):
-        attributes = {**attributes, **current}
-    opens = attributes.get("opening_hours_open")
-    closes = attributes.get("opening_hours_close")
-    if not isinstance(opens, str) or not re.fullmatch(r"\d{1,2}:\d{2}", opens):
-        opening = policy.day_start_minutes
-    else:
-        opening = _minutes(opens)
-    if not isinstance(closes, str) or not re.fullmatch(r"\d{1,2}:\d{2}", closes):
-        closing = policy.day_end_minutes
-    else:
-        closing = 24 * 60 if closes in {"00:00", "24:00"} else _minutes(closes)
-        if closing <= opening:
-            closing = policy.day_end_minutes
-    return opening, closing
+    if not isinstance(current, dict):
+        current = {}
+
+    business_status = str(
+        current.get("business_status") or attributes.get("business_status") or ""
+    ).lower()
+    if business_status in {"permanently_closed", "temporarily_closed"}:
+        return []
+
+    effective = attributes.get("effective_opening")
+    if isinstance(effective, dict) and (
+        local_date is None or effective.get("date") in {None, local_date.isoformat()}
+    ):
+        windows = _opening_payload_windows(effective, policy)
+        if windows is not None:
+            return windows
+
+    daily = current.get("opening")
+    if isinstance(daily, dict) and (
+        local_date is None
+        or str(daily.get("local_date") or "") == local_date.isoformat()
+    ):
+        windows = _opening_payload_windows(daily, policy)
+        if windows is not None:
+            return windows
+
+    weekly = current.get("weekly_opening")
+    if local_date is not None and isinstance(weekly, dict):
+        days = weekly.get("days")
+        weekday = local_date.strftime("%A").lower()
+        if isinstance(days, list):
+            selected = next(
+                (
+                    item
+                    for item in days
+                    if isinstance(item, dict)
+                    and str(item.get("day") or "").lower() == weekday
+                ),
+                None,
+            )
+            if selected is not None:
+                if selected.get("closed") is True:
+                    return []
+                if selected.get("open_24_hours") is True:
+                    return [(policy.day_start_minutes, policy.day_end_minutes)]
+                parsed = _serialized_opening_intervals(
+                    selected.get("intervals"), policy
+                )
+                return parsed
+
+    baseline = current.get("opening_hours")
+    if isinstance(baseline, dict):
+        parsed = _single_opening_window(
+            baseline.get("opens_at"),
+            baseline.get("closes_at"),
+            policy,
+        )
+        if parsed is not None:
+            return [parsed]
+
+    parsed = _single_opening_window(
+        attributes.get("opening_hours_open"),
+        attributes.get("opening_hours_close"),
+        policy,
+    )
+    if parsed is not None:
+        return [parsed]
+    return [(policy.day_start_minutes, policy.day_end_minutes)]
+
+
+def _opening_payload_windows(
+    payload: dict[str, Any],
+    policy: PlanningPolicy,
+) -> list[tuple[int, int]] | None:
+    status = str(payload.get("status") or "").lower()
+    if status in {"closed_today", "temporarily_closed", "permanently_closed"}:
+        return []
+    if payload.get("is_24_hours") is True:
+        return [(policy.day_start_minutes, policy.day_end_minutes)]
+    raw_intervals = payload.get("intervals", payload.get("opening_intervals"))
+    if isinstance(raw_intervals, list):
+        parsed = _serialized_opening_intervals(raw_intervals, policy)
+        return parsed or (None if status == "open_today" else [])
+    return None
+
+
+def _serialized_opening_intervals(
+    value: Any,
+    policy: PlanningPolicy,
+) -> list[tuple[int, int]]:
+    if not isinstance(value, list):
+        return []
+    result: list[tuple[int, int]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        parsed = _single_opening_window(
+            item.get("opens_at"),
+            item.get("closes_at"),
+            policy,
+            closes_next_day=bool(item.get("closes_next_day")),
+        )
+        if parsed is not None:
+            result.append(parsed)
+    return sorted(result)
+
+
+def _single_opening_window(
+    opens: Any,
+    closes: Any,
+    policy: PlanningPolicy,
+    *,
+    closes_next_day: bool = False,
+) -> tuple[int, int] | None:
+    opening = _opening_time_minutes(opens)
+    closing = _opening_time_minutes(closes, closing=True)
+    if opening is None or closing is None:
+        return None
+    if closes_next_day or closing <= opening:
+        closing = 24 * 60
+    opening = max(opening, policy.day_start_minutes)
+    closing = min(closing, policy.day_end_minutes)
+    return (opening, closing) if opening < closing else None
+
+
+def _opening_time_minutes(value: Any, *, closing: bool = False) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?", value.strip())
+    if match is None:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    if hours == 24 and minutes == 0:
+        return 24 * 60
+    if hours > 23 or minutes > 59:
+        return None
+    if closing and hours == 0 and minutes == 0:
+        return 24 * 60
+    return hours * 60 + minutes
 
 
 def _visit_duration_minutes(
@@ -1086,10 +1499,7 @@ def _has_fallback_candidates(
 ) -> bool:
     return any(
         item.get("entity_type") in PLANNABLE_ENTITY_TYPES
-        and (
-            item.get("entity_type") != "hotel"
-            or duration_nights > 0
-        )
+        and (item.get("entity_type") != "hotel" or duration_nights > 0)
         for item in candidates
     )
 
@@ -1116,50 +1526,118 @@ def _rank_candidates(
         term in normalized_message
         for term in ("nguoi lon tuoi", "nguoi cao tuoi", "nhe nhang", "khong qua nhieu")
     )
-    budget_focus = any(term in normalized_message for term in ("tiet kiem", "re", "ngan sach", "budget"))
-    rain_focus = any(term in normalized_message for term in ("mua", "mua phun", "thoi tiet xau", "rain"))
-    beach_focus = any(term in normalized_message for term in ("bien", "bai tam", "beach", "ven bien"))
-    culture_focus = any(term in normalized_message for term in ("van hoa", "lich su", "bao tang", "di tich", "chua", "thap"))
-    food_focus = any(term in normalized_message for term in ("am thuc", "an uong", "mon ngon", "quan an"))
+    budget_focus = any(
+        term in normalized_message
+        for term in ("tiet kiem", "re", "ngan sach", "budget")
+    )
+    rain_focus = any(
+        term in normalized_message
+        for term in ("mua", "mua phun", "thoi tiet xau", "rain")
+    )
+    beach_focus = any(
+        term in normalized_message for term in ("bien", "bai tam", "beach", "ven bien")
+    )
+    culture_focus = any(
+        term in normalized_message
+        for term in ("van hoa", "lich su", "bao tang", "di tich", "chua", "thap")
+    )
+    food_focus = any(
+        term in normalized_message
+        for term in ("am thuc", "an uong", "mon ngon", "quan an")
+    )
     family_focus = any(term in normalized_message for term in ("tre nho", "gia dinh"))
-    excluded_nightlife = any(term in normalized_message for term in ("khong bar", "khong club", "khong muon di bar", "khong muon di club"))
+    excluded_nightlife = any(
+        term in normalized_message
+        for term in (
+            "khong bar",
+            "khong club",
+            "khong muon di bar",
+            "khong muon di club",
+        )
+    )
 
     def key(item: dict[str, Any]) -> tuple[float, float, str]:
         attributes = item.get("attributes") or {}
-        searchable = normalize_text(" ".join(
-            str(item.get(key) or "") for key in ("name", "category", "description")
-        ) + " " + " ".join(str(value) for value in attributes.values()))
+        searchable = normalize_text(
+            " ".join(
+                str(item.get(key) or "") for key in ("name", "category", "description")
+            )
+            + " "
+            + " ".join(str(value) for value in attributes.values())
+        )
         outdoor_penalty = 0.0
-        if weather is not None and weather.suitability == "unsuitable" and _is_explicitly_outdoor(item):
+        if (
+            weather is not None
+            and weather.suitability == "unsuitable"
+            and _is_explicitly_outdoor(item)
+        ):
             outdoor_penalty += 10.0
         elif rain_focus:
             if _is_explicitly_outdoor(item):
                 outdoor_penalty += 2.0
-            if attributes.get("is_indoor") is True or attributes.get("indoor") is True or "all weather" in searchable or "light rain" in searchable:
+            if (
+                attributes.get("is_indoor") is True
+                or attributes.get("indoor") is True
+                or "all weather" in searchable
+                or "light rain" in searchable
+            ):
                 outdoor_penalty -= 2.0
         preference_bonus = 0.0
         entity_type = str(item.get("entity_type") or "")
         if excluded_nightlife and entity_type == "nightlife":
             preference_bonus += 100.0
-        if beach_focus and any(term in searchable for term in ("bien", "beach", "sea", "coast", "bai tam", "ven bien")):
+        if beach_focus and any(
+            term in searchable
+            for term in ("bien", "beach", "sea", "coast", "bai tam", "ven bien")
+        ):
             preference_bonus -= 4.0
-        if culture_focus and any(term in searchable for term in ("van hoa", "lich su", "museum", "bao tang", "chua", "thap", "di tich")):
+        if culture_focus and any(
+            term in searchable
+            for term in (
+                "van hoa",
+                "lich su",
+                "museum",
+                "bao tang",
+                "chua",
+                "thap",
+                "di tich",
+            )
+        ):
             preference_bonus -= 4.0
         if food_focus and entity_type == "restaurant":
             preference_bonus -= 3.0
-        if family_focus and any(term in searchable for term in ("family", "gia dinh", "tre em", "children")):
+        if family_focus and any(
+            term in searchable for term in ("family", "gia dinh", "tre em", "children")
+        ):
             preference_bonus -= 2.0
-        if compact_pace and any(term in searchable for term in ("museum", "bao tang", "park", "cafe", "spa", "hot spring", "suoi khoang")):
+        if compact_pace and any(
+            term in searchable
+            for term in (
+                "museum",
+                "bao tang",
+                "park",
+                "cafe",
+                "spa",
+                "hot spring",
+                "suoi khoang",
+            )
+        ):
             preference_bonus -= 1.5
         if budget_focus:
             maximum = attributes.get("price_per_person_max")
             try:
-                preference_bonus += min(float(maximum) / 1_000_000, 5.0) if maximum is not None else 0.0
+                preference_bonus += (
+                    min(float(maximum) / 1_000_000, 5.0) if maximum is not None else 0.0
+                )
             except (TypeError, ValueError):
                 pass
         distance = _distance_from_origin(item, latitude, longitude)
         score = float(item.get("score") or 0)
-        return outdoor_penalty + preference_bonus, distance - score, str(item.get("place_id"))
+        return (
+            outdoor_penalty + preference_bonus,
+            distance - score,
+            str(item.get("place_id")),
+        )
 
     return sorted(candidates, key=key)
 
@@ -1171,17 +1649,10 @@ def _distance_from_origin(
 ) -> float:
     if latitude is None or longitude is None:
         return float(candidate.get("distance_km") or 9999)
-    attributes = candidate.get("attributes") or {}
-    target_lat = attributes.get("lat", attributes.get("latitude"))
-    target_lon = attributes.get("lng", attributes.get("longitude"))
-    if not isinstance(target_lat, (int, float)) or not isinstance(target_lon, (int, float)):
+    target = _candidate_coordinates(candidate)
+    if target is None:
         return 9999
-    radius_km = 6371.0088
-    lat1, lat2 = math.radians(latitude), math.radians(float(target_lat))
-    delta_lat = lat2 - lat1
-    delta_lon = math.radians(float(target_lon) - longitude)
-    value = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
-    return radius_km * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+    return _haversine_km((latitude, longitude), target)
 
 
 def _fallback_rationale(role: ItineraryRole, weather: WeatherAssessment | None) -> str:
@@ -1197,7 +1668,9 @@ def _fallback_rationale(role: ItineraryRole, weather: WeatherAssessment | None) 
     return labels[role] + weather_note
 
 
-def _materialize(plan: ItineraryPlan, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _materialize(
+    plan: ItineraryPlan, candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     by_id = {str(item["place_id"]): item for item in candidates}
     return [
         {

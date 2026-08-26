@@ -84,7 +84,12 @@ def enrich_current_data(
         try:
             current_by_id = _current_places_by_id(client.places(missing_current_ids))
             evidence = [
-                _merge_current_place(item, current_by_id) for item in evidence
+                _merge_current_place(
+                    item,
+                    current_by_id,
+                    travel_date=travel_date,
+                )
+                for item in evidence
             ]
             completed.append("places")
         except Exception as exc:
@@ -104,11 +109,13 @@ def enrich_current_data(
                 check_in=travel_date,
                 stay_nights=_stay_nights(graph.query_plan),
             )
-            hotel_by_id.update({
-                str(item.get("hotel_id")): item
-                for item in response.get("results", [])
-                if isinstance(item, dict) and item.get("hotel_id")
-            })
+            hotel_by_id.update(
+                {
+                    str(item.get("hotel_id")): item
+                    for item in response.get("results", [])
+                    if isinstance(item, dict) and item.get("hotel_id")
+                }
+            )
             evidence = [
                 _merge_hotel_availability(item, hotel_by_id) for item in evidence
             ]
@@ -122,9 +129,7 @@ def enrich_current_data(
 
     route_count = 0
     route_failures = 0
-    route_requested = bool(
-        {"route", "transport"}.intersection(graph.required_tools)
-    )
+    route_requested = bool({"route", "transport"}.intersection(graph.required_tools))
     if include_traffic and route_requested and not itinerary and len(place_ids) >= 2:
         origin_id, destination_id = place_ids[:2]
         departure = _on_demand_departure(travel_date)
@@ -166,8 +171,10 @@ def enrich_current_data(
     )
     if failures and "current_data_partial" not in warnings:
         warnings.append("current_data_partial")
-    status = "completed" if completed and not failures else (
-        "partial" if completed else "unavailable"
+    status = (
+        "completed"
+        if completed and not failures
+        else ("partial" if completed else "unavailable")
     )
     updated = graph.model_copy(
         update={
@@ -241,6 +248,8 @@ def _current_places_by_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any
 def _merge_current_place(
     evidence: dict[str, Any],
     current_by_id: Mapping[str, dict[str, Any]],
+    *,
+    travel_date: date | None,
 ) -> dict[str, Any]:
     place_id = str(evidence.get("place_id") or "")
     envelope = current_by_id.get(place_id)
@@ -250,7 +259,7 @@ def _merge_current_place(
     if not isinstance(place, dict):
         return evidence
     attributes = dict(evidence.get("attributes") or {})
-    attributes["current"] = {
+    current = {
         key: value
         for key, value in {
             "business_status": place.get("business_status"),
@@ -264,10 +273,28 @@ def _merge_current_place(
         }.items()
         if value is not None
     }
+    attributes["current"] = current
     location = place.get("location")
     if isinstance(location, dict):
-        attributes.setdefault("latitude", location.get("lat"))
-        attributes.setdefault("longitude", location.get("lng"))
+        latitude = location.get("lat", location.get("latitude"))
+        longitude = location.get("lng", location.get("longitude"))
+        if isinstance(latitude, (int, float)) and not isinstance(latitude, bool):
+            attributes["lat"] = latitude
+            attributes["latitude"] = latitude
+        if isinstance(longitude, (int, float)) and not isinstance(longitude, bool):
+            attributes["lng"] = longitude
+            attributes["longitude"] = longitude
+    effective_hours = _effective_current_opening(place, travel_date)
+    if effective_hours is not None:
+        attributes["effective_opening"] = effective_hours
+        intervals = effective_hours.get("intervals")
+        if isinstance(intervals, list) and len(intervals) == 1:
+            interval = intervals[0]
+            if isinstance(interval, dict):
+                if isinstance(interval.get("opens_at"), str):
+                    attributes["opening_hours_open"] = interval["opens_at"]
+                if isinstance(interval.get("closes_at"), str):
+                    attributes["opening_hours_close"] = interval["closes_at"]
     return {
         **evidence,
         "name": place.get("name") or evidence.get("name"),
@@ -278,14 +305,94 @@ def _merge_current_place(
     }
 
 
+def _effective_current_opening(
+    place: Mapping[str, Any],
+    travel_date: date | None,
+) -> dict[str, Any] | None:
+    daily = place.get("opening")
+    if isinstance(daily, Mapping):
+        local_date = str(daily.get("local_date") or "")
+        if travel_date is not None and local_date == travel_date.isoformat():
+            return {
+                "source": "daily_observation",
+                "date": local_date,
+                "status": daily.get("status"),
+                "is_24_hours": bool(daily.get("is_24_hours")),
+                "intervals": _opening_intervals(daily.get("opening_intervals")),
+            }
+
+    weekly = place.get("weekly_opening")
+    if travel_date is not None and isinstance(weekly, Mapping):
+        weekday = travel_date.strftime("%A").lower()
+        days = weekly.get("days")
+        if isinstance(days, list):
+            selected = next(
+                (
+                    item
+                    for item in days
+                    if isinstance(item, Mapping)
+                    and str(item.get("day") or "").lower() == weekday
+                ),
+                None,
+            )
+            if selected is not None:
+                return {
+                    "source": "weekly_schedule",
+                    "date": travel_date.isoformat(),
+                    "status": "closed_today"
+                    if selected.get("closed")
+                    else "open_today",
+                    "is_24_hours": bool(selected.get("open_24_hours")),
+                    "intervals": _opening_intervals(selected.get("intervals")),
+                }
+
+    baseline = place.get("opening_hours")
+    if isinstance(baseline, Mapping):
+        opens_at = baseline.get("opens_at")
+        closes_at = baseline.get("closes_at")
+        intervals = (
+            [{"opens_at": opens_at, "closes_at": closes_at}]
+            if isinstance(opens_at, str) and isinstance(closes_at, str)
+            else []
+        )
+        if intervals:
+            return {
+                "source": "verified_baseline",
+                "date": travel_date.isoformat() if travel_date is not None else None,
+                "status": "open_today",
+                "is_24_hours": False,
+                "intervals": intervals,
+            }
+    return None
+
+
+def _opening_intervals(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        opens_at = item.get("opens_at")
+        closes_at = item.get("closes_at")
+        if not isinstance(opens_at, str) or not isinstance(closes_at, str):
+            continue
+        result.append(
+            {
+                "opens_at": opens_at,
+                "closes_at": closes_at,
+                "closes_next_day": bool(item.get("closes_next_day")),
+            }
+        )
+    return result
+
+
 def _hotel_ids(
     evidence: list[dict[str, Any]],
     itinerary: list[dict[str, Any]],
 ) -> list[str]:
     values = [
-        item.get("place_id")
-        for item in evidence
-        if item.get("entity_type") == "hotel"
+        item.get("place_id") for item in evidence if item.get("entity_type") == "hotel"
     ]
     values.extend(
         slot.get("place_id")

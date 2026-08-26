@@ -28,7 +28,21 @@ class FakeCurrentData:
                             "category": "hotel",
                             "business_status": "operational",
                             "price_level": 2,
-                            "location": {"lat": 13.77, "lng": 109.23},
+                            "location": {
+                                "latitude": 13.77,
+                                "longitude": 109.23,
+                            },
+                            "opening": {
+                                "local_date": "2026-08-31",
+                                "status": "open_today",
+                                "is_24_hours": False,
+                                "opening_intervals": [
+                                    {
+                                        "opens_at": "16:00:00",
+                                        "closes_at": "23:00:00",
+                                    }
+                                ],
+                            },
                             "updated_at": "2026-08-25T00:00:00Z",
                         },
                     },
@@ -151,6 +165,10 @@ def test_enrichment_preserves_contract_and_attaches_current_context() -> None:
     assert hotel["place_id"] == "hotel_qn_001"
     assert hotel["name"] == "Trivago Hotel Name"
     assert hotel["attributes"]["current"]["business_status"] == "operational"
+    assert hotel["attributes"]["lat"] == 13.77
+    assert hotel["attributes"]["lng"] == 109.23
+    assert hotel["attributes"]["opening_hours_open"] == "16:00:00"
+    assert hotel["attributes"]["opening_hours_close"] == "23:00:00"
     assert hotel["attributes"]["hotel_availability"]["selected_window_index"] == 1
     assert client.hotel_request is not None
     assert client.hotel_request["stay_nights"] == 2
@@ -189,7 +207,10 @@ def test_preplanning_enrichment_reuses_current_and_hotel_context() -> None:
         include_traffic=False,
     )
 
-    assert result.evidence[0]["attributes"]["hotel_availability"]["selected_window_index"] == 1
+    assert (
+        result.evidence[0]["attributes"]["hotel_availability"]["selected_window_index"]
+        == 1
+    )
     assert trace["completed"] == ["places", "hotel_availability"]
     assert trace["traffic_enabled"] is False
 
@@ -233,7 +254,9 @@ def test_enrichment_is_fail_soft_and_keeps_original_data() -> None:
     )
 
     assert result.evidence[0]["name"] == "Old Hotel"
-    assert result.itinerary[0]["slots"][0]["transport_to_next"]["status"] == "unavailable"
+    assert (
+        result.itinerary[0]["slots"][0]["transport_to_next"]["status"] == "unavailable"
+    )
     assert result.required_tools == original.required_tools
     assert result.warnings == ["current_data_partial"]
     assert trace["status"] == "unavailable"
