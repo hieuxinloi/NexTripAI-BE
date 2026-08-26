@@ -5,8 +5,15 @@ from datetime import date
 from src.core_ai.nextrip_agent.planning import (
     ItineraryPlan,
     ItineraryPlanDraft,
+    PlanningPolicy,
     PlannedDay,
     PlannedStop,
+    PreferredPeriod,
+    SemanticAssignment,
+    SemanticDay,
+    SemanticItineraryPlan,
+    SemanticItineraryPlanDraft,
+    SemanticStay,
     is_itinerary_request,
     planning_agent_node,
 )
@@ -52,7 +59,9 @@ def _candidates():
 
 
 def test_gemini_planning_draft_avoids_unsupported_schema_keywords() -> None:
-    schema_text = str(ItineraryPlanDraft.model_json_schema())
+    schema_text = str(ItineraryPlanDraft.model_json_schema()) + str(
+        SemanticItineraryPlanDraft.model_json_schema()
+    )
 
     assert "pattern" not in schema_text
     assert "minLength" not in schema_text
@@ -92,6 +101,118 @@ class FakePlanner:
         )
 
 
+class FakeSemanticPlanner:
+    def plan_semantic_itinerary(self, **kwargs):
+        assert kwargs["city"] == CITY
+        assert kwargs["duration_days"] == 3
+        return SemanticItineraryPlan(
+            days=[
+                SemanticDay(
+                    day=1,
+                    assignments=[
+                        SemanticAssignment(
+                            place_id="attr_1",
+                            role="activity",
+                            preferred_period=PreferredPeriod.MORNING,
+                            rationale="Khởi đầu bằng văn hóa.",
+                        ),
+                        SemanticAssignment(
+                            place_id="rest_1",
+                            role="meal",
+                            preferred_period=PreferredPeriod.LUNCH,
+                            rationale="Ăn trưa gần nhóm điểm ngày đầu.",
+                        ),
+                        SemanticAssignment(
+                            place_id="cafe_1",
+                            role="cafe_break",
+                            preferred_period=PreferredPeriod.AFTERNOON,
+                            rationale="Nghỉ nhẹ buổi chiều.",
+                        ),
+                    ],
+                ),
+                SemanticDay(
+                    day=2,
+                    assignments=[
+                        SemanticAssignment(
+                            place_id="attr_2",
+                            role="activity",
+                            preferred_period=PreferredPeriod.MORNING,
+                            rationale="Tiếp tục trải nghiệm văn hóa.",
+                        ),
+                        SemanticAssignment(
+                            place_id="rest_2",
+                            role="meal",
+                            preferred_period=PreferredPeriod.LUNCH,
+                            rationale="Bữa trưa ngày hai.",
+                        ),
+                        SemanticAssignment(
+                            place_id="cafe_2",
+                            role="cafe_break",
+                            preferred_period=PreferredPeriod.AFTERNOON,
+                            rationale="Nghỉ nhẹ ngày hai.",
+                        ),
+                    ],
+                ),
+                SemanticDay(
+                    day=3,
+                    assignments=[
+                        SemanticAssignment(
+                            place_id="attr_3",
+                            role="activity",
+                            preferred_period=PreferredPeriod.MORNING,
+                            rationale="Hoạt động cuối chuyến đi.",
+                        ),
+                        SemanticAssignment(
+                            place_id="rest_3",
+                            role="meal",
+                            preferred_period=PreferredPeriod.LUNCH,
+                            rationale="Bữa trưa cuối chuyến đi.",
+                        ),
+                    ],
+                ),
+            ],
+            stay=SemanticStay(hotel_id="hotel_1"),
+            summary="Ba ngày cân bằng.",
+        )
+
+
+class FakePlanningRoutes:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def recommend_transport(self, **kwargs):
+        self.calls.append(kwargs)
+        duration = (
+            100 * 60
+            if kwargs["origin_id"] == "attr_1"
+            and kwargs["destination_id"] == "rest_1"
+            else 10 * 60
+        )
+        return {
+            "status": "recommended",
+            "recommended_mode": "drive",
+            "selection_reason": "fastest_route_duration",
+            "degraded": False,
+            "partial": False,
+            "options": [
+                {
+                    "mode": "drive",
+                    "status": "eligible",
+                    "recommended": True,
+                    "distance_meters": 12000,
+                    "duration_seconds": duration,
+                    "route": {
+                        "route": {
+                            "provider": "here",
+                            "traffic_basis": "current",
+                            "traffic_aware": True,
+                        }
+                    },
+                }
+            ],
+        }
+
+
 def test_itinerary_request_recognizes_lo_trinh() -> None:
     assert is_itinerary_request("Tôi ở Quy Nhơn 2 ngày 1 đêm, lộ trình thế nào?")
 
@@ -128,6 +249,139 @@ def test_planning_agent_builds_grounded_balanced_city_scoped_itinerary() -> None
         "check_in",
     }
     assert trace["planner"] == "gemini_structured"
+
+
+def test_hybrid_planner_schedules_semantics_and_keeps_one_hotel_stay() -> None:
+    graph = AgentResult(
+        answer="",
+        answer_type="recommendation",
+        evidence=_candidates(),
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=FakeSemanticPlanner(),
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    hotel_slots = [
+        (day["day"], slot["role"], slot["place_id"])
+        for day in result.itinerary
+        for slot in day["slots"]
+        if slot["entity_type"] == "hotel"
+    ]
+    assert trace["planner"] == "gemini_hybrid"
+    assert hotel_slots == [
+        (1, "check_in", "hotel_1"),
+        (3, "check_out", "hotel_1"),
+    ]
+    assert all(
+        any(slot["role"] == "activity" for slot in day["slots"])
+        for day in result.itinerary
+    )
+
+
+def test_hybrid_scheduler_uses_injected_policy_instead_of_fixed_clock_template() -> None:
+    graph = AgentResult(
+        answer="",
+        evidence=_candidates(),
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+    policy = PlanningPolicy(
+        day_start_minutes=9 * 60,
+        morning_end_minutes=12 * 60,
+        activity_duration_minutes=60,
+    )
+
+    result, _ = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=FakeSemanticPlanner(),
+        city=CITY,
+        latitude=None,
+        longitude=None,
+        policy=policy,
+    )
+
+    first = result.itinerary[0]["slots"][0]
+    assert first["start_time"] == "09:00"
+    assert first["end_time"] == "10:00"
+
+
+def test_hybrid_scheduler_uses_actual_route_duration_before_fixing_next_start() -> None:
+    graph = AgentResult(
+        answer="",
+        evidence=_candidates(),
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+    routes = FakePlanningRoutes()
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=FakeSemanticPlanner(),
+        city=CITY,
+        latitude=None,
+        longitude=None,
+        route_provider=routes,
+        travel_date=date(2026, 8, 26),
+    )
+
+    first_day = result.itinerary[0]["slots"]
+    assert trace["planner"] == "gemini_hybrid"
+    assert first_day[0]["transport_to_next"]["duration_seconds"] == 6000
+    assert first_day[1]["start_time"] == "11:25"
+    assert first_day[0]["transport_to_next"]["provider"] == "here"
+    assert routes.calls
+
+
+def test_hybrid_rejects_unavailable_semantic_hotel_and_falls_back_to_available() -> None:
+    candidates = _candidates()
+    candidates[10]["attributes"]["hotel_availability"] = {
+        "selected_window_index": None,
+        "windows": [{"availability": "unavailable", "offers": []}],
+    }
+    available_hotel = _candidate("hotel_2", "hotel")
+    available_hotel["attributes"]["hotel_availability"] = {
+        "selected_window_index": 0,
+        "windows": [{"availability": "available", "offers": [{"amount": 900000}]}],
+    }
+    candidates.append(available_hotel)
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=FakeSemanticPlanner(),
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    hotel_ids = {
+        slot["place_id"]
+        for day in result.itinerary
+        for slot in day["slots"]
+        if slot["entity_type"] == "hotel"
+    }
+    assert trace["planner"] == "deterministic_fallback"
+    assert hotel_ids == {"hotel_2"}
+    assert any(
+        warning.startswith("planning_fallback:ValueError")
+        for warning in result.warnings
+    )
 
 
 def test_planning_fallback_drops_wrong_city_and_outdoor_places_in_bad_weather() -> None:

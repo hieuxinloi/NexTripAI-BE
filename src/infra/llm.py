@@ -9,7 +9,12 @@ from loguru import logger
 from src.config import Settings
 from src.core_ai.nextrip_agent.answer_generation import fact_display_text, fact_value_text
 from src.core_ai.nextrip_agent.conversation import ConversationResolution
-from src.core_ai.nextrip_agent.planning import ItineraryPlan, ItineraryPlanDraft
+from src.core_ai.nextrip_agent.planning import (
+    ItineraryPlan,
+    ItineraryPlanDraft,
+    SemanticItineraryPlan,
+    SemanticItineraryPlanDraft,
+)
 from src.shared.logging import safe_text
 from src.shared.telemetry import record_llm_usage, span
 
@@ -78,6 +83,21 @@ prefer candidates explicitly marked indoor and do not choose candidates explicit
 marked outdoor-only. Use current coordinates and candidate coordinates to prefer a
 nearby first stop, but do not estimate exact travel times. Keep rationales concise and
 refer only to supplied candidate or weather attributes.
+"""
+
+SEMANTIC_PLANNING_SYSTEM_INSTRUCTION = """You are NexTripAI's grounded semantic itinerary planner.
+Return only data matching the supplied schema. Select only place_id values that appear
+in candidates and keep every assignment inside the requested city. Assign places to the
+requested days, roles, and broad preferred periods; never invent exact clock times,
+travel durations, prices, opening hours, or availability. Python will calculate the
+feasible clock schedule and road travel after your response.
+
+Use activity only for attraction/nightlife, meal only for restaurant, cafe_break only
+for cafe, and rest only for hotel/cafe. Do not emit check_in or check_out assignments.
+When an overnight stay is requested, choose at most one grounded hotel in stay; it
+covers the whole city stay and must not be selected again as a daily activity. Balance
+the days when candidates permit, respect weather and personalization, avoid duplicate
+places, and keep rationales concise and grounded in supplied attributes.
 """
 
 
@@ -323,6 +343,75 @@ class GeminiAnswerGenerator:
         )
         return plan
 
+    def plan_semantic_itinerary(
+        self,
+        *,
+        question: str,
+        city: str,
+        duration_days: int,
+        duration_nights: int,
+        candidates: list[dict[str, Any]],
+        weather: list[dict[str, Any]],
+        latitude: float | None,
+        longitude: float | None,
+        personalization_context: dict[str, Any] | None = None,
+    ) -> SemanticItineraryPlan:
+        prompt = {
+            "question": question,
+            "city": city,
+            "duration_days": duration_days,
+            "duration_nights": duration_nights,
+            "origin": (
+                {"latitude": latitude, "longitude": longitude}
+                if latitude is not None and longitude is not None
+                else None
+            ),
+            "weather": weather,
+            "personalization": personalization_context or {},
+            "candidates": [_planning_candidate(item) for item in candidates],
+        }
+        with span("gemini.plan_semantic_itinerary", model=self._planning_model):
+            response = self._client.models.generate_content(
+                model=self._planning_model,
+                contents=json.dumps(prompt, ensure_ascii=False, separators=(",", ":")),
+                config=self._types.GenerateContentConfig(
+                    system_instruction=SEMANTIC_PLANNING_SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=SemanticItineraryPlanDraft,
+                    thinking_config=self._types.ThinkingConfig(
+                        thinking_level=self._planning_thinking_level,
+                    ),
+                ),
+            )
+        parsed = response.parsed
+        draft = (
+            cast(SemanticItineraryPlanDraft, parsed)
+            if parsed is not None
+            else SemanticItineraryPlanDraft.model_validate_json(response.text or "{}")
+        )
+        plan = SemanticItineraryPlan.model_validate(draft.model_dump(mode="python"))
+        usage = response.usage_metadata
+        input_tokens = int(usage.prompt_token_count or 0) if usage else 0
+        output_tokens = int(usage.candidates_token_count or 0) if usage else 0
+        thinking_tokens = int(usage.thoughts_token_count or 0) if usage else 0
+        record_llm_usage(
+            self._planning_model,
+            input_tokens,
+            output_tokens,
+            thinking_tokens=thinking_tokens,
+            input_cost_per_million=self._input_cost_per_million,
+            output_cost_per_million=self._output_cost_per_million,
+        )
+        logger.info(
+            "Semantic itinerary planned model={} days={} input_tokens={} output_tokens={} thinking_tokens={}",
+            self._planning_model,
+            len(plan.days),
+            input_tokens,
+            output_tokens,
+            thinking_tokens,
+        )
+        return plan
+
     def _generate(
         self,
         *,
@@ -556,6 +645,27 @@ def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
         )
         if key in attributes
     }
+    current = attributes.get("current")
+    if isinstance(current, dict):
+        supported_attributes["current"] = {
+            key: current[key]
+            for key in (
+                "business_status",
+                "open_now",
+                "opening_hours_open",
+                "opening_hours_close",
+                "price_level",
+                "price_min",
+                "price_max",
+                "updated_at",
+                "stale",
+            )
+            if key in current
+        }
+    availability = attributes.get("hotel_availability")
+    compact_availability = _compact_hotel_availability(availability)
+    if compact_availability is not None:
+        supported_attributes["hotel_availability"] = compact_availability
     return {
         "place_id": item.get("place_id"),
         "name": item.get("name"),
@@ -565,6 +675,46 @@ def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score"),
         "distance_km": item.get("distance_km"),
         "attributes": supported_attributes,
+    }
+
+
+def _compact_hotel_availability(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    selected_index = value.get("selected_window_index")
+    windows = value.get("windows")
+    selected = None
+    if (
+        isinstance(selected_index, int)
+        and isinstance(windows, list)
+        and 0 <= selected_index < len(windows)
+        and isinstance(windows[selected_index], dict)
+    ):
+        window = windows[selected_index]
+        offers = window.get("offers") if isinstance(window.get("offers"), list) else []
+        priced = [offer for offer in offers if isinstance(offer, dict)][:3]
+        selected = {
+            "check_in": window.get("check_in"),
+            "check_out": window.get("check_out"),
+            "availability": window.get("availability"),
+            "offers": [
+                {
+                    key: offer.get(key)
+                    for key in (
+                        "currency",
+                        "nightly_amount",
+                        "total_amount",
+                        "min_amount",
+                        "max_amount",
+                    )
+                    if offer.get(key) is not None
+                }
+                for offer in priced
+            ],
+        }
+    return {
+        "selected_window_index": selected_index,
+        "selected_window": selected,
     }
 
 

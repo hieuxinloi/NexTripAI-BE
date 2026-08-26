@@ -162,6 +162,57 @@ def test_enrichment_preserves_contract_and_attaches_current_context() -> None:
     assert trace["status"] == "completed"
 
 
+class NoRepeatedLookupCurrentData:
+    def places(self, place_ids):
+        assert place_ids == ["attr_qn_001"]
+        return {"items": []}
+
+    def hotel_availability(self, **kwargs):
+        raise AssertionError("hotel availability lookup must be reused")
+
+    def recommend_transport(self, **kwargs):
+        raise AssertionError("traffic must be disabled during pre-planning enrichment")
+
+
+def test_preplanning_enrichment_reuses_current_and_hotel_context() -> None:
+    enriched, _ = enrich_current_data(
+        _graph(),
+        FakeCurrentData(),
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+    )
+
+    result, trace = enrich_current_data(
+        enriched,
+        NoRepeatedLookupCurrentData(),
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+    )
+
+    assert result.evidence[0]["attributes"]["hotel_availability"]["selected_window_index"] == 1
+    assert trace["completed"] == ["places", "hotel_availability"]
+    assert trace["traffic_enabled"] is False
+
+
+def test_postplanning_enrichment_reuses_a_route_already_computed_by_scheduler() -> None:
+    enriched, _ = enrich_current_data(
+        _graph(),
+        FakeCurrentData(),
+        travel_date=date(2026, 8, 31),
+    )
+
+    result, trace = enrich_current_data(
+        enriched,
+        NoRepeatedLookupCurrentData(),
+        travel_date=date(2026, 8, 31),
+    )
+
+    route = result.itinerary[0]["slots"][0]["transport_to_next"]
+    assert route["provider"] == "here"
+    assert trace["route_count"] == 1
+    assert trace["failures"] == []
+
+
 class FailingCurrentData:
     def places(self, place_ids):
         raise ConnectionError("offline")

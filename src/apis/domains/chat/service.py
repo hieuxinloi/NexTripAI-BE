@@ -278,6 +278,7 @@ def handle_chat(
         kb_client,
         weather_client,
         planning_agent=answer_generator,
+        current_data_client=current_data_client,
     ).run(
         message=graph_message,
         session_id=request.session_id,

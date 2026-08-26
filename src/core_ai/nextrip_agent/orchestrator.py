@@ -8,6 +8,10 @@ from time import perf_counter
 from typing import Any
 
 from src.core_ai.nextrip_agent.constants import KbVersion
+from src.core_ai.nextrip_agent.current_data import (
+    SupportsCurrentData,
+    enrich_current_data,
+)
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.knowledge import SupportsKbSearch
 from src.core_ai.nextrip_agent.planning import (
@@ -171,10 +175,12 @@ class TravelOrchestrator:
         kb_client: SupportsKbSearch,
         weather_client: OpenMeteoWeatherClient | None,
         planning_agent: SupportsItineraryPlanning | None = None,
+        current_data_client: SupportsCurrentData | None = None,
     ) -> None:
         self.kb_client = kb_client
         self.weather_client = weather_client
         self.planning_agent = planning_agent
+        self.current_data_client = current_data_client
 
     def run(
         self,
@@ -301,22 +307,34 @@ class TravelOrchestrator:
             )
 
         if plan.run_planning:
+            graph, preplanning_current_trace = enrich_current_data(
+                graph,
+                self.current_data_client,
+                travel_date=travel_date,
+                include_traffic=False,
+            )
+            trace.append(
+                {
+                    **preplanning_current_trace,
+                    "node": "current_data_preplanning",
+                }
+            )
             graph, planning_trace = planning_agent_node(
                 message=message,
                 graph=graph,
                 weather_forecast=weather_forecast,
-                # V8 already returns a deterministic, graph-grounded candidate
-                # set.  Calling a second LLM planner here was the main source
-                # of 45s timeouts in itinerary evaluation.  Let the validated
-                # deterministic planner build the schedule for V8; older KB
-                # versions retain their historical LLM planner behaviour.
-                planner=(self.planning_agent if not is_v8 else None),
+                # Gemini now returns only grounded semantic assignments. Python
+                # owns clock scheduling, hotel lifecycle, and validation, so V8
+                # can use the planner without trusting LLM-generated arithmetic.
+                planner=self.planning_agent,
                 city=effective_city,
                 latitude=latitude,
                 longitude=longitude,
                 personalization_context=dict(
                     (conversation_context or {}).get("personalization") or {}
                 ),
+                route_provider=self.current_data_client,
+                travel_date=travel_date,
             )
 
         return OrchestratedResult(
