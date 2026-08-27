@@ -27,9 +27,13 @@ class KbClient:
         admin_api_key: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
-        self._client = client if client is not None else httpx.Client(
-            trust_env=False,
-            timeout=timeout_seconds,
+        self._client = (
+            client
+            if client is not None
+            else httpx.Client(
+                trust_env=False,
+                timeout=timeout_seconds,
+            )
         )
         self._owns_client = client is None
         self._timeout = timeout_seconds
@@ -137,6 +141,30 @@ class KbClient:
         )
         return SavedPlacesResponse.model_validate(payload)
 
+    def nearby(
+        self,
+        *,
+        anchor_place_id: str,
+        entity_types: list[str] | None,
+        city: str | None,
+        radius_km: float = 5.0,
+        excluded_place_ids: list[str] | None = None,
+        limit: int = 8,
+        kb_version: str = "v8",
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/kb/nearby",
+            {
+                "kb_version": kb_version,
+                "anchor_place_id": anchor_place_id,
+                "entity_types": entity_types or [],
+                "city": city,
+                "radius_km": radius_km,
+                "excluded_place_ids": excluded_place_ids or [],
+                "limit": limit,
+            },
+        )
+
     def admin_deployments(self) -> dict[str, Any]:
         return self._admin_request("GET", "/api/kb/admin/deployments")
 
@@ -202,6 +230,7 @@ class KbClient:
             payload.get("top_k"),
         )
         try:
+
             def operation() -> httpx.Response:
                 response = self._client.post(
                     f"{self.base_url}{path}",

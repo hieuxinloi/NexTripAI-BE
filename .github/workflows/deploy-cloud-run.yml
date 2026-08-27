@@ -32,4 +32,4 @@ jobs:
             --image "$IMAGE" \
             --service-account "${{ vars.RUNTIME_SERVICE_ACCOUNT }}" \
             --allow-unauthenticated \
-            --set-env-vars "ENVIRONMENT=production,LOG_JSON=true,AUTH_MODE=firebase,FIREBASE_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},CHAT_STORE_BACKEND=firestore,ALLOW_CLIENT_KB_VERSION=false,KB_AUTH_MODE=google_oidc,NEXTRIP_KB_BASE_URL=${{ vars.KB_CLOUD_RUN_URL }},KB_AUTH_AUDIENCE=${{ vars.KB_CLOUD_RUN_URL }},ACTIVE_KB_VERSION=v8,ANSWER_GENERATION_MODE=gemini"
+            --update-env-vars "ENVIRONMENT=production,LOG_JSON=true,AUTH_MODE=firebase,FIREBASE_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},CHAT_STORE_BACKEND=firestore,ALLOW_CLIENT_KB_VERSION=false,KB_AUTH_MODE=google_oidc,NEXTRIP_KB_BASE_URL=${{ vars.KB_CLOUD_RUN_URL }},KB_AUTH_AUDIENCE=${{ vars.KB_CLOUD_RUN_URL }},ACTIVE_KB_VERSION=v8,ANSWER_GENERATION_MODE=gemini"

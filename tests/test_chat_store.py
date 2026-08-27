@@ -4,7 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from src.config import Settings
-from src.infra.chat_store import InMemoryChatStore, create_chat_store
+from src.infra.chat_store import (
+    InMemoryChatStore,
+    TripPlanRevisionConflictError,
+    create_chat_store,
+)
 
 
 def test_memory_store_keeps_recent_messages_in_order() -> None:
@@ -96,6 +100,79 @@ def test_memory_store_round_trips_session_memory() -> None:
         "session-1",
         user_id="user-a",
     ) == {"summary": "User prefers beaches."}
+
+
+def test_memory_store_compare_and_set_active_trip_plan() -> None:
+    store = InMemoryChatStore()
+
+    created = store.compare_and_set_active_trip_plan(
+        "session-1",
+        {"revision": 1, "days": [{"day": 1, "slots": []}]},
+        expected_revision=None,
+        user_id="user-a",
+    )
+    created["days"][0]["slots"].append({"slot_id": "caller-mutation"})
+
+    assert store.get_active_trip_plan("session-1", user_id="user-a") == {
+        "revision": 1,
+        "days": [{"day": 1, "slots": []}],
+    }
+
+    updated = store.compare_and_set_active_trip_plan(
+        "session-1",
+        {"revision": 2, "days": [{"day": 1, "slots": [{"slot_id": "s1"}]}]},
+        expected_revision=1,
+        user_id="user-a",
+    )
+
+    assert updated["revision"] == 2
+
+
+def test_memory_store_rejects_stale_trip_plan_revision() -> None:
+    store = InMemoryChatStore()
+    store.compare_and_set_active_trip_plan(
+        "session-1",
+        {"revision": 1, "days": []},
+        expected_revision=None,
+        user_id="user-a",
+    )
+
+    with pytest.raises(TripPlanRevisionConflictError) as caught:
+        store.compare_and_set_active_trip_plan(
+            "session-1",
+            {"revision": 1, "days": [{"day": 1}]},
+            expected_revision=None,
+            user_id="user-a",
+        )
+
+    assert caught.value.expected_revision is None
+    assert caught.value.actual_revision == 1
+
+
+def test_memory_store_validates_next_trip_plan_revision() -> None:
+    store = InMemoryChatStore()
+
+    with pytest.raises(ValueError, match="advance exactly once"):
+        store.compare_and_set_active_trip_plan(
+            "session-1",
+            {"revision": 2, "days": []},
+            expected_revision=None,
+            user_id="user-a",
+        )
+
+
+def test_memory_store_deletes_active_trip_plan_with_session() -> None:
+    store = InMemoryChatStore()
+    store.compare_and_set_active_trip_plan(
+        "session-1",
+        {"revision": 1, "days": []},
+        expected_revision=None,
+        user_id="user-a",
+    )
+
+    assert store.delete_session("session-1", user_id="user-a") is True
+    assert store.get_active_trip_plan("session-1", user_id="user-a") is None
+
 
 def test_memory_store_lists_sessions_without_deleting_previous_chat() -> None:
     store = InMemoryChatStore()

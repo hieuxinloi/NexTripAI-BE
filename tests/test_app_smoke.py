@@ -15,6 +15,7 @@ from src.apis.domains.evaluations.workbook import (
     ParsedEvaluationWorkbook,
 )
 from src.security.auth import Principal, current_principal
+from src.infra.chat_store import TripPlanRevisionConflictError
 
 
 def firebase_admin_principal() -> Principal:
@@ -39,12 +40,14 @@ class AvailableTypedKbClient:
         return {
             "kb_version": kb_version,
             "answer_type": "recommendation",
-            "recommendations": [{
-                "place_id": "attr_qn_001",
-                "name": "Kỳ Co",
-                "city": "Quy Nhơn",
-                "entity_type": "attraction",
-            }],
+            "recommendations": [
+                {
+                    "place_id": "attr_qn_001",
+                    "name": "Kỳ Co",
+                    "city": "Quy Nhơn",
+                    "entity_type": "attraction",
+                }
+            ],
             "evidence": [],
             "facts": [],
             "missing_fields": [],
@@ -71,6 +74,15 @@ class VersionDiscoveryKbClient:
 class OnlyV7ReadyKbClient:
     def ready_versions(self):
         return {"v7"}
+
+
+class StaleTripPlanWorkerPool:
+    async def submit(self, request, _kb_client, _answer_generator):
+        raise TripPlanRevisionConflictError(
+            session_id=request.session_id,
+            expected_revision=2,
+            actual_revision=3,
+        )
 
 
 class MultiVersionTypedKbClient:
@@ -355,6 +367,26 @@ def test_explicit_kb_version_selection_is_strict() -> None:
     assert response.json()["kb_version"] == "v5"
 
 
+def test_stale_trip_plan_revision_returns_conflict() -> None:
+    app = create_app()
+    app.dependency_overrides[current_principal] = firebase_admin_principal
+    with TestClient(app) as client:
+        app.state.kb_client = MultiVersionTypedKbClient()
+        app.state.chat_worker_pool = StaleTripPlanWorkerPool()
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "Thay quán cà phê trong ngày 2",
+                "session_id": "stale-plan-session",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Trip plan revision conflict: expected 2, current revision is 3."
+    }
+
+
 def test_explicit_kb_version_is_rejected_when_selection_is_disabled() -> None:
     app = create_app()
     app.dependency_overrides[current_principal] = firebase_admin_principal
@@ -463,7 +495,10 @@ def test_stream_emits_structured_error_when_kb_is_down() -> None:
     assert response.status_code == 200
     assert "event: accepted" in response.text
     assert "event: error" in response.text
-    assert f"Knowledge Base {expected_version} is temporarily unavailable." in response.text
+    assert (
+        f"Knowledge Base {expected_version} is temporarily unavailable."
+        in response.text
+    )
 
 
 def test_explicit_unavailable_version_does_not_silently_fallback() -> None:

@@ -99,6 +99,27 @@
         }
       }
     },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Auth Profile",
+        "operationId": "auth_profile_api_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthProfileResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/chat": {
       "post": {
         "tags": [
@@ -364,6 +385,48 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EvaluationJobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evaluations/{job_id}/history": {
+      "delete": {
+        "tags": [
+          "evaluations"
+        ],
+        "summary": "Delete Evaluation History",
+        "operationId": "delete_evaluation_history_api_evaluations__job_id__history_delete",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationDeleteResponse"
                 }
               }
             }
@@ -1235,6 +1298,165 @@
   },
   "components": {
     "schemas": {
+      "ActiveTripPlan": {
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Plan Id"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Revision"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "partial",
+              "draft"
+            ],
+            "title": "Status",
+            "default": "draft"
+          },
+          "city": {
+            "type": "string",
+            "title": "City"
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date"
+          },
+          "duration_days": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 1.0,
+            "title": "Duration Days"
+          },
+          "constraints": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Constraints"
+          },
+          "itinerary": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Itinerary"
+          },
+          "selected_places": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Selected Places"
+          },
+          "budget_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BudgetSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_operation": {
+            "$ref": "#/components/schemas/PlanOperation",
+            "default": "create"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plan_id",
+          "revision",
+          "city",
+          "duration_days",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ActiveTripPlan"
+      },
+      "AuthProfileResponse": {
+        "properties": {
+          "uid": {
+            "type": "string",
+            "title": "Uid"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "support",
+              "admin"
+            ],
+            "title": "Role"
+          },
+          "auth_mode": {
+            "type": "string",
+            "title": "Auth Mode"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Permissions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "uid",
+          "role",
+          "auth_mode",
+          "permissions"
+        ],
+        "title": "AuthProfileResponse"
+      },
       "Body_create_evaluation_api_evaluations_post": {
         "properties": {
           "file": {
@@ -1253,6 +1475,128 @@
           "kb_version"
         ],
         "title": "Body_create_evaluation_api_evaluations_post"
+      },
+      "BudgetSummary": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable"
+            ],
+            "title": "Status",
+            "default": "unavailable"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "VND"
+          },
+          "party_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Party Size",
+            "default": 2
+          },
+          "budget_amount": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Amount"
+          },
+          "estimated_min": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Min"
+          },
+          "estimated_max": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Max"
+          },
+          "within_budget": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Within Budget"
+          },
+          "remaining_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Min"
+          },
+          "remaining_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Max"
+          },
+          "priced_item_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Priced Item Count",
+            "default": 0
+          },
+          "estimable_item_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Estimable Item Count",
+            "default": 0
+          },
+          "missing_place_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Place Ids"
+          },
+          "exclusions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exclusions"
+          }
+        },
+        "type": "object",
+        "title": "BudgetSummary"
       },
       "ChatHistoryResponse": {
         "properties": {
@@ -1442,6 +1786,18 @@
               }
             ],
             "title": "Include Weather"
+          },
+          "expected_plan_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Plan Revision"
           }
         },
         "type": "object",
@@ -1591,6 +1947,43 @@
             },
             "type": "array",
             "title": "Weather Forecast"
+          },
+          "active_trip_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActiveTripPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanChange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "budget_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BudgetSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nearby_suggestions": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "type": "array",
+            "title": "Nearby Suggestions"
           }
         },
         "type": "object",
@@ -1759,6 +2152,19 @@
           "expected"
         ],
         "title": "EvaluationCaseResult"
+      },
+      "EvaluationDeleteResponse": {
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted"
+        ],
+        "title": "EvaluationDeleteResponse"
       },
       "EvaluationHistoryItem": {
         "properties": {
@@ -2154,6 +2560,17 @@
       },
       "ItinerarySlot": {
         "properties": {
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          },
           "order": {
             "type": "integer",
             "minimum": 1.0,
@@ -2226,6 +2643,18 @@
               }
             ],
             "title": "Hotel Availability"
+          },
+          "cost_estimate": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Estimate"
           }
         },
         "type": "object",
@@ -2619,6 +3048,94 @@
         "type": "object",
         "title": "PersonalizationUpdate"
       },
+      "PlanChange": {
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/PlanOperation"
+          },
+          "previous_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Revision"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "target_slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Slot Id"
+          },
+          "changed_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Slot Ids"
+          },
+          "preserved_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preserved Slot Ids"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operation"
+        ],
+        "title": "PlanChange"
+      },
+      "PlanOperation": {
+        "type": "string",
+        "enum": [
+          "none",
+          "create",
+          "replace_slot",
+          "remove_slot",
+          "add_slot",
+          "move_slot",
+          "update_time",
+          "update_constraints",
+          "replan_day",
+          "replan_all",
+          "suggest_nearby",
+          "query_plan"
+        ],
+        "title": "PlanOperation"
+      },
       "PreferenceEvent": {
         "properties": {
           "event_id": {
@@ -2989,6 +3506,41 @@
             ],
             "title": "Duration Seconds"
           },
+          "distance_km": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance Km"
+          },
+          "duration_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Minutes"
+          },
+          "mode_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode Label"
+          },
           "provider": {
             "anyOf": [
               {
@@ -3021,6 +3573,11 @@
               }
             ],
             "title": "Traffic Aware"
+          },
+          "reference_time_assumed": {
+            "type": "boolean",
+            "title": "Reference Time Assumed",
+            "default": false
           },
           "degraded": {
             "type": "boolean",

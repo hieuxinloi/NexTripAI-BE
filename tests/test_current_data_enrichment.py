@@ -215,6 +215,67 @@ def test_preplanning_enrichment_reuses_current_and_hotel_context() -> None:
     assert trace["traffic_enabled"] is False
 
 
+class RefreshedOccupancyCurrentData:
+    def __init__(self) -> None:
+        self.hotel_request: dict | None = None
+
+    def places(self, place_ids):
+        return {"items": []}
+
+    def hotel_availability(self, **kwargs):
+        self.hotel_request = kwargs
+        return {
+            "results": [
+                {
+                    "hotel_id": "hotel_qn_001",
+                    "selected_window_index": 0,
+                    "windows": [
+                        {
+                            "availability": "available",
+                            "offers": [
+                                {
+                                    "currency": "VND",
+                                    "total_amount": 2_400_000,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def recommend_transport(self, **kwargs):
+        raise AssertionError("traffic must remain disabled")
+
+
+def test_force_hotel_refresh_discards_stale_occupancy_context() -> None:
+    enriched, _ = enrich_current_data(
+        _graph(),
+        FakeCurrentData(),
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+    )
+    client = RefreshedOccupancyCurrentData()
+
+    result, _ = enrich_current_data(
+        enriched,
+        client,
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+        adults=4,
+        children=1,
+        rooms=2,
+        force_hotel_refresh=True,
+    )
+
+    assert client.hotel_request is not None
+    assert client.hotel_request["adults"] == 4
+    assert client.hotel_request["children"] == 1
+    assert client.hotel_request["rooms"] == 2
+    availability = result.evidence[0]["attributes"]["hotel_availability"]
+    assert availability["windows"][0]["offers"][0]["total_amount"] == 2_400_000
+
+
 def test_postplanning_enrichment_reuses_a_route_already_computed_by_scheduler() -> None:
     enriched, _ = enrich_current_data(
         _graph(),

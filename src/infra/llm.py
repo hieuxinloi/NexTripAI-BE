@@ -7,7 +7,10 @@ from typing import Any, cast
 from loguru import logger
 
 from src.config import Settings
-from src.core_ai.nextrip_agent.answer_generation import fact_display_text, fact_value_text
+from src.core_ai.nextrip_agent.answer_generation import (
+    fact_display_text,
+    fact_value_text,
+)
 from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.core_ai.nextrip_agent.planning import (
     ItineraryPlan,
@@ -31,6 +34,9 @@ For recommendations, keep the retrieved order and explain only relationships pre
 When structured_itinerary is present, follow its days, slots, times, and place
 references exactly. Never reschedule, add, or remove a place. When it is absent,
 do not invent a timed itinerary; present retrieved places as candidates only.
+For each itinerary leg, include the supplied mode_label, duration_minutes and
+distance_km. Include a supplied cost_estimate for the corresponding place. If a
+cost is unknown, say it is not yet available; never convert a price tier to VND.
 When weather_assessment is present, include its forecast and suitability advice in the same
 answer, format dates naturally as DD/MM/YYYY, then recommend suitable retrieved places.
 Connect weather to a place only when its supplied entity_type or category supports
@@ -50,6 +56,8 @@ information when grounded places are available.
 Conversation memory is only for continuity, preferences, and resolving user intent.
 Never treat a previous assistant answer as verified factual evidence. Current facts must
 come from verified_facts, retrieved_places, matched_graph_paths, or weather_assessment.
+When conversation_memory.budget_summary is present, state its grounded estimated range,
+coverage and exclusions. A partial estimate is not proof that the whole trip fits budget.
 """
 
 CONVERSATION_SYSTEM_INSTRUCTION = """You are NexTripAI's conversation contextualizer.
@@ -65,6 +73,18 @@ weather, or current external facts. Rewrite it as one self-contained standalone_
 resolving pronouns, omitted subjects, preferences, places, dates, and entities from the
 transcript. Preserve the user's intent and language. Never invent missing information.
 If a reference is genuinely ambiguous, keep the original wording instead of guessing.
+
+When structured_trip_context.active_trip_plan exists, classify an explicit request to
+create, replace, remove, add, move, retime, replan, query, or update constraints through
+plan_mutation. Resolve the target with slot_id whenever it is unambiguous. A request for
+nearby suggestions uses suggest_nearby and MUST NOT mutate the plan. Do not infer a plan
+edit from an unrelated travel question. Preserve all unaffected slots by default. Never
+invent a replacement place_id; replacement discovery is performed by the backend.
+For add_slot, put the insertion position in target_day/target_order and the requested
+place in replacement_place_name or replacement_query. For move_slot, identify the
+existing slot with target_slot_id and put the new position in destination_day and
+destination_order. For update_time, identify the existing slot and put its new clock
+range in start_time/end_time; day_start_time/day_end_time are whole-plan constraints.
 
 Write a compact Vietnamese rolling summary of durable user preferences, decisions,
 travel constraints, and the conversation's important outcomes. Do not include secrets,
@@ -432,14 +452,10 @@ class GeminiAnswerGenerator:
                 if slot.get("place_id")
             }
             evidence = [
-                item
-                for item in evidence
-                if str(item.get("place_id")) in selected_ids
+                item for item in evidence if str(item.get("place_id")) in selected_ids
             ]
             facts = [
-                item
-                for item in facts
-                if str(item.get("subject_id")) in selected_ids
+                item for item in facts if str(item.get("subject_id")) in selected_ids
             ]
             matched_paths = [
                 item
@@ -603,6 +619,10 @@ def _protected_context(
                     "entity_type": slot.get("entity_type"),
                     "role": slot.get("role"),
                     "rationale": slot.get("rationale"),
+                    "transport_to_next": _compact_itinerary_transport(
+                        slot.get("transport_to_next")
+                    ),
+                    "cost_estimate": _compact_itinerary_cost(slot.get("cost_estimate")),
                 }
             )
         if slots:
@@ -641,6 +661,16 @@ def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
             "weather_suitable",
             "price_per_person_min",
             "price_per_person_max",
+            "price_range_min",
+            "price_range_max",
+            "drink_price_min",
+            "drink_price_max",
+            "entry_fee_min",
+            "entry_fee_max",
+            "ticket_price_adult",
+            "ticket_price_child",
+            "ticket_price_student",
+            "ticket_price_elderly",
             "rating",
         )
         if key in attributes
@@ -675,6 +705,44 @@ def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score"),
         "distance_km": item.get("distance_km"),
         "attributes": supported_attributes,
+    }
+
+
+def _compact_itinerary_transport(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "destination_place_id",
+            "mode_label",
+            "recommended_mode",
+            "duration_minutes",
+            "distance_km",
+            "provider",
+            "traffic_basis",
+        )
+        if value.get(key) is not None
+    }
+
+
+def _compact_itinerary_cost(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "status",
+            "currency",
+            "amount_min",
+            "amount_max",
+            "basis",
+            "party_size",
+            "stay_nights",
+            "nightly_amount",
+            "included_in_budget",
+        )
+        if value.get(key) is not None
     }
 
 
@@ -749,9 +817,7 @@ def _restore_references(answer: str, replacements: dict[str, str]) -> str:
     if missing:
         raise RuntimeError(f"Gemini violated grounded reference contract: {missing}")
     place_references = [
-        reference
-        for reference in replacements
-        if reference.startswith("[[PLACE_")
+        reference for reference in replacements if reference.startswith("[[PLACE_")
     ]
     if len(place_references) == 1:
         reference = place_references[0]

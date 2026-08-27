@@ -53,6 +53,44 @@ def test_kb_context_preserves_city_provenance_and_resolved_reference() -> None:
     }
 
 
+def test_kb_context_does_not_lock_a_new_turn_to_previous_plan_filters() -> None:
+    context = ConversationContext(
+        city="Quy Nhơn",
+        city_source="current_message",
+        history_messages=3,
+    )
+    resolved = ResolvedTurn(
+        resolution=ConversationResolution(
+            standalone_message="Tìm quán cafe yên tĩnh ở Quy Nhơn",
+        ),
+        status="completed",
+        reason="model",
+        original_message="Tìm cafe khác",
+    )
+
+    payload = _kb_conversation_context(
+        session_memory={
+            "kb_context": {
+                "previous_intent": "plan_candidates",
+                "duration_days": 3,
+                "entity_types": ["attraction"],
+                "previous_recommendations": ["attr_qn_001"],
+                "turn_count": 2,
+            }
+        },
+        context=context,
+        resolved_turn=resolved,
+    )
+
+    assert payload is not None
+    assert payload["turn_count"] == 2
+    assert payload["resolved_query"] == "Tìm quán cafe yên tĩnh ở Quy Nhơn"
+    assert "previous_intent" not in payload
+    assert "duration_days" not in payload
+    assert "entity_types" not in payload
+    assert "previous_recommendations" not in payload
+
+
 class FakeWeatherClient:
     configured = True
 

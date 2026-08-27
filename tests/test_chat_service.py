@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.apis.domains.chat.schemas import (
     AuthenticatedChatRequest,
     ChatRequest,
@@ -18,6 +20,7 @@ from src.core_ai.nextrip_agent.constants import (
 )
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
+from src.infra.chat_store import InMemoryChatStore, TripPlanRevisionConflictError
 from src.infra.user_profile_store import InMemoryUserProfileStore
 
 
@@ -43,7 +46,9 @@ class FakeKbClient:
 
     def search(self, *, query, city, entity_types, top_k):
         self.last_top_k = top_k
-        self.calls.append({"query": query, "entity_types": entity_types, "top_k": top_k})
+        self.calls.append(
+            {"query": query, "entity_types": entity_types, "top_k": top_k}
+        )
         entity_type = entity_types[0] if entity_types else "cafe"
         return {
             "results": [
@@ -162,6 +167,85 @@ class FakeV8ItineraryClient(FakeKbClient):
             "missing_fields": [],
             "trace": [],
         }
+
+
+class FakeV8AddCandidateClient(FakeV8ItineraryClient):
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        self.query = query
+        self.context = conversation_context
+        return {
+            "kb_version": "v8",
+            "answer_type": "recommendation",
+            "recommendations": [
+                {
+                    "place_id": "cafe_qn_099",
+                    "name": "Cafe Mới",
+                    "city": "Quy Nhơn",
+                    "entity_type": "cafe",
+                    "category": "cafe",
+                    "attributes": {
+                        "lat": 13.77,
+                        "lng": 109.22,
+                        "price_per_person_min": 35_000,
+                        "price_per_person_max": 60_000,
+                    },
+                }
+            ],
+            "itinerary": [],
+            "missing_fields": [],
+            "trace": [],
+        }
+
+
+class FakeV8TwoDayItineraryClient(FakeV8ItineraryClient):
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        payload = super().query_typed(
+            query=query,
+            top_k=top_k,
+            kb_version=kb_version,
+            conversation_context=conversation_context,
+        )
+        payload["recommendations"].append(
+            {
+                "place_id": "cafe_qn_002",
+                "name": "Cafe Ngày Hai",
+                "city": "Quy Nhơn",
+                "entity_type": "cafe",
+                "category": "cafe",
+            }
+        )
+        payload["itinerary"].append(
+            {
+                "day": 2,
+                "slots": [
+                    {
+                        "order": 1,
+                        "start_time": "09:30",
+                        "end_time": "10:30",
+                        "place_id": "cafe_qn_002",
+                        "name": "Cafe Ngày Hai",
+                        "city": "Quy Nhơn",
+                        "entity_type": "cafe",
+                        "role": "cafe_break",
+                    }
+                ],
+            }
+        )
+        return payload
 
 
 class FakeV8RouteClient(FakeKbClient):
@@ -336,11 +420,21 @@ def test_answer_agent_uses_grounded_generator_context() -> None:
 
 
 def test_answer_generator_omits_redundant_location_when_address_exists() -> None:
-    facts = facts_for_answer([
-        {"subject_id": "hotel_qn_001", "predicate": "address", "value": "186 Xuân Diệu"},
-        {"subject_id": "hotel_qn_001", "predicate": "location", "value": {"lat": 1, "lng": 2}},
-        {"subject_id": "hotel_qn_001", "predicate": "phone", "value": "0123"},
-    ])
+    facts = facts_for_answer(
+        [
+            {
+                "subject_id": "hotel_qn_001",
+                "predicate": "address",
+                "value": "186 Xuân Diệu",
+            },
+            {
+                "subject_id": "hotel_qn_001",
+                "predicate": "location",
+                "value": {"lat": 1, "lng": 2},
+            },
+            {"subject_id": "hotel_qn_001", "predicate": "phone", "value": "0123"},
+        ]
+    )
 
     predicates = [fact["predicate"] for fact in facts]
     assert predicates == ["address", "phone"]
@@ -404,6 +498,186 @@ def test_v8_itinerary_context_and_warnings_survive_the_agent_boundary() -> None:
     assert result.conversation_context["turn_count"] == 2
 
 
+def test_chat_persists_and_revises_an_active_trip_plan() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Lên lịch trình một ngày ở Quy Nhơn",
+            session_id="mutable-plan",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    assert first.active_trip_plan is not None
+    assert first.active_trip_plan.revision == 1
+    assert first.itinerary[0].slots[0].slot_id
+
+    second = handle_chat(
+        ChatRequest(
+            message="Đổi ngân sách thành 2 triệu",
+            session_id="mutable-plan",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    assert second.orchestration_mode == "plan_revision"
+    assert second.active_trip_plan is not None
+    assert second.active_trip_plan.revision == 2
+    assert second.budget_summary is not None
+    assert second.budget_summary.budget_amount == 2_000_000
+
+    with pytest.raises(TripPlanRevisionConflictError):
+        handle_chat(
+            ChatRequest(
+                message="Bỏ Eo Gió",
+                session_id="mutable-plan",
+                kb_version="v8",
+                expected_plan_revision=1,
+            ),
+            FakeV8ItineraryClient(),
+            FakeAnswerGenerator(),
+            chat_store=store,
+        )
+
+
+def test_active_plan_is_not_overwritten_by_an_unrelated_recommendation() -> None:
+    store = InMemoryChatStore()
+    handle_chat(
+        ChatRequest(
+            message="Lên lịch trình một ngày ở Quy Nhơn",
+            session_id="plan-independent-query",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    response = handle_chat(
+        ChatRequest(
+            message="Gợi ý thêm các quán trà ở Quy Nhơn",
+            session_id="plan-independent-query",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    stored = store.get_active_trip_plan("plan-independent-query")
+    assert stored is not None
+    assert stored["revision"] == 1
+    assert response.plan_change is None
+
+
+def test_chat_add_move_and_retime_are_local_plan_revisions() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Lên lịch trình một ngày ở Quy Nhơn",
+            session_id="plan-local-edits",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert first.active_trip_plan is not None
+
+    added = handle_chat(
+        ChatRequest(
+            message="Thêm Cafe Mới vào ngày 1 lúc 11:00",
+            session_id="plan-local-edits",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8AddCandidateClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert added.active_trip_plan is not None
+    assert added.active_trip_plan.revision == 2
+    assert [slot.name for slot in added.itinerary[0].slots] == ["Eo Gió", "Cafe Mới"]
+    added_slot_id = added.itinerary[0].slots[1].slot_id
+
+    moved = handle_chat(
+        ChatRequest(
+            message="Chuyển Cafe Mới sang ngày 1 vị trí 1",
+            session_id="plan-local-edits",
+            kb_version="v8",
+            expected_plan_revision=2,
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert moved.active_trip_plan is not None
+    assert moved.active_trip_plan.revision == 3
+    assert moved.itinerary[0].slots[0].slot_id == added_slot_id
+
+    retimed = handle_chat(
+        ChatRequest(
+            message="Đổi giờ Cafe Mới sang lúc 15:00",
+            session_id="plan-local-edits",
+            kb_version="v8",
+            expected_plan_revision=3,
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert retimed.active_trip_plan is not None
+    assert retimed.active_trip_plan.revision == 4
+    assert retimed.itinerary[0].slots[0].start_time == "15:00"
+
+
+def test_replan_day_preserves_other_days_and_their_slot_ids() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Lên lịch trình 2 ngày ở Quy Nhơn",
+            session_id="replan-one-day",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8TwoDayItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert first.active_trip_plan is not None
+    preserved_id = first.itinerary[0].slots[0].slot_id
+
+    second = handle_chat(
+        ChatRequest(
+            message="Sắp xếp lại ngày 2",
+            session_id="replan-one-day",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8TwoDayItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    assert second.active_trip_plan is not None
+    assert second.active_trip_plan.revision == 2
+    assert second.itinerary[0].slots[0].slot_id == preserved_id
+    assert second.plan_change is not None
+    assert second.plan_change.operation.value == "replan_day"
+    assert preserved_id in second.plan_change.preserved_slot_ids
+
+
 def test_chat_route_question_calls_current_traffic_with_canonical_ids() -> None:
     answer_generator = FakeAnswerGenerator("Đi xe máy, dự kiến khoảng 65 phút.")
     current_data = FakeRouteCurrentData()
@@ -427,13 +701,12 @@ def test_chat_route_question_calls_current_traffic_with_canonical_ids() -> None:
     assert current_data.route_request["destination_id"] == "rest_qn_021"
     assert response.required_tools == []
     assert response.facts[0]["predicate"] == "route_recommendation"
-    assert response.evidence[0].attributes["transport_to_destination"][
-        "provider"
-    ] == "here"
+    assert (
+        response.evidence[0].attributes["transport_to_destination"]["provider"]
+        == "here"
+    )
     assert response.answer == "Đi xe máy, dự kiến khoảng 65 phút."
-    assert answer_generator.calls[0]["facts"][0][
-        "predicate"
-    ] == "route_recommendation"
+    assert answer_generator.calls[0]["facts"][0]["predicate"] == "route_recommendation"
 
 
 def test_user_profile_reaches_v8_as_structured_personalization_context() -> None:
@@ -631,7 +904,10 @@ def test_unverified_geo_scope_is_reported_as_data_gap() -> None:
         }
     )
 
-    assert "chưa có địa điểm với quan hệ vị trí đủ tin cậy tại Tuy Phước" in state["answer"]
+    assert (
+        "chưa có địa điểm với quan hệ vị trí đủ tin cậy tại Tuy Phước"
+        in state["answer"]
+    )
 
 
 def test_internal_query_constraint_is_rendered_as_natural_clarification() -> None:

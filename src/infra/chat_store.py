@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Protocol
 
 from src.config import Settings
+
+
+class TripPlanRevisionConflictError(RuntimeError):
+    """Raised when a trip-plan write is based on a stale revision."""
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        expected_revision: int | None,
+        actual_revision: int | None,
+    ) -> None:
+        self.session_id = session_id
+        self.expected_revision = expected_revision
+        self.actual_revision = actual_revision
+        super().__init__(
+            "Trip plan revision conflict: "
+            f"expected {expected_revision!r}, current revision is {actual_revision!r}."
+        )
 
 
 class ChatStore(Protocol):
@@ -71,6 +91,22 @@ class ChatStore(Protocol):
         user_id: str | None = None,
     ) -> None: ...
 
+    def get_active_trip_plan(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def compare_and_set_active_trip_plan(
+        self,
+        session_id: str,
+        plan: dict[str, Any],
+        *,
+        expected_revision: int | None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
     def get_idempotent_response(
         self,
         session_id: str,
@@ -99,6 +135,7 @@ class InMemoryChatStore:
         self._messages: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._session_users: dict[str, str] = {}
         self._session_memory: dict[str, dict[str, Any]] = {}
+        self._active_trip_plans: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
         self._idempotency: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = Lock()
@@ -138,7 +175,9 @@ class InMemoryChatStore:
                 },
             )
             if role == "user" and session["message_count"] == 0:
-                session["title"] = content.strip().replace("\n", " ")[:120] or session["title"]
+                session["title"] = (
+                    content.strip().replace("\n", " ")[:120] or session["title"]
+                )
             session["updated_at"] = now
             session["message_count"] += 1
             self._messages[session_id].append(item)
@@ -161,6 +200,7 @@ class InMemoryChatStore:
             self._messages.pop(session_id, None)
             self._session_users.pop(session_id, None)
             self._session_memory.pop(session_id, None)
+            self._active_trip_plans.pop(session_id, None)
             self._sessions.pop(session_id, None)
             for cache_key in [key for key in self._idempotency if key[0] == session_id]:
                 self._idempotency.pop(cache_key, None)
@@ -240,6 +280,39 @@ class InMemoryChatStore:
         with self._lock:
             self._claim_or_check(session_id, user_id)
             self._session_memory[session_id] = dict(memory)
+
+    def get_active_trip_plan(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self._check_owner(session_id, user_id)
+            plan = self._active_trip_plans.get(session_id)
+            return deepcopy(plan) if plan is not None else None
+
+    def compare_and_set_active_trip_plan(
+        self,
+        session_id: str,
+        plan: dict[str, Any],
+        *,
+        expected_revision: int | None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        candidate = _validated_next_plan(plan, expected_revision=expected_revision)
+        with self._lock:
+            self._claim_or_check(session_id, user_id)
+            current = self._active_trip_plans.get(session_id)
+            actual_revision = _plan_revision(current)
+            if actual_revision != expected_revision:
+                raise TripPlanRevisionConflictError(
+                    session_id=session_id,
+                    expected_revision=expected_revision,
+                    actual_revision=actual_revision,
+                )
+            self._active_trip_plans[session_id] = candidate
+            return deepcopy(candidate)
 
     def get_idempotent_response(
         self,
@@ -343,7 +416,11 @@ class FirestoreChatStore:
                 "city": city,
                 "title": (
                     existing.get("title")
-                    or (content.strip().replace("\n", " ")[:120] if role == "user" else "Cuộc trò chuyện mới")
+                    or (
+                        content.strip().replace("\n", " ")[:120]
+                        if role == "user"
+                        else "Cuộc trò chuyện mới"
+                    )
                 ),
                 "updated_at": self._firestore.SERVER_TIMESTAMP,
                 "message_count": message_count,
@@ -381,7 +458,11 @@ class FirestoreChatStore:
                 },
                 merge=True,
             )
-        return {"session_id": session_id, "title": title or "Cuộc trò chuyện mới", "message_count": 0}
+        return {
+            "session_id": session_id,
+            "title": title or "Cuộc trò chuyện mới",
+            "message_count": 0,
+        }
 
     def list_sessions(
         self,
@@ -389,20 +470,24 @@ class FirestoreChatStore:
         user_id: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        query = self._sessions.order_by("updated_at", direction=self._firestore.Query.DESCENDING).limit(limit)
+        query = self._sessions.order_by(
+            "updated_at", direction=self._firestore.Query.DESCENDING
+        ).limit(limit)
         rows: list[dict[str, Any]] = []
         for document in query.stream():
             item = document.to_dict() or {}
             if user_id is not None and item.get("user_id") not in {None, user_id}:
                 continue
             message_count = int(item.get("message_count") or 0)
-            rows.append({
-                "session_id": document.id,
-                "title": item.get("title") or "Cuộc trò chuyện mới",
-                "created_at": item.get("created_at"),
-                "updated_at": item.get("updated_at"),
-                "message_count": message_count,
-            })
+            rows.append(
+                {
+                    "session_id": document.id,
+                    "title": item.get("title") or "Cuộc trò chuyện mới",
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "message_count": message_count,
+                }
+            )
         return rows
 
     def recent_messages(
@@ -462,6 +547,7 @@ class FirestoreChatStore:
         self._check_owner(session_id, user_id, snapshot.to_dict())
         self._delete_collection(session.collection("messages"))
         self._delete_collection(session.collection("idempotency"))
+        self._delete_collection(session.collection("trip_plans"))
         session.delete()
         return True
 
@@ -497,6 +583,75 @@ class FirestoreChatStore:
             },
             merge=True,
         )
+
+    def get_active_trip_plan(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        session = self._sessions.document(session_id)
+        snapshot = session.get()
+        if not snapshot.exists:
+            return None
+        self._check_owner(session_id, user_id, snapshot.to_dict())
+        plan_snapshot = session.collection("trip_plans").document("active").get()
+        if not plan_snapshot.exists:
+            return None
+        payload = (plan_snapshot.to_dict() or {}).get("payload")
+        return deepcopy(payload) if isinstance(payload, dict) else None
+
+    def compare_and_set_active_trip_plan(
+        self,
+        session_id: str,
+        plan: dict[str, Any],
+        *,
+        expected_revision: int | None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        candidate = _validated_next_plan(plan, expected_revision=expected_revision)
+        session = self._sessions.document(session_id)
+        active_plan = session.collection("trip_plans").document("active")
+        transaction = self._client.transaction()
+
+        @self._firestore.transactional
+        def commit(transaction: Any) -> dict[str, Any]:
+            session_snapshot = session.get(transaction=transaction)
+            session_data = session_snapshot.to_dict() if session_snapshot.exists else {}
+            owner = session_data.get("user_id")
+            if user_id is not None and owner is not None and owner != user_id:
+                raise PermissionError("Session belongs to another user")
+
+            plan_snapshot = active_plan.get(transaction=transaction)
+            stored = plan_snapshot.to_dict() if plan_snapshot.exists else {}
+            payload = stored.get("payload") if isinstance(stored, dict) else None
+            actual_revision = _plan_revision(payload)
+            if actual_revision != expected_revision:
+                raise TripPlanRevisionConflictError(
+                    session_id=session_id,
+                    expected_revision=expected_revision,
+                    actual_revision=actual_revision,
+                )
+
+            transaction.set(
+                session,
+                {
+                    "user_id": owner or user_id,
+                    "updated_at": self._firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            transaction.set(
+                active_plan,
+                {
+                    "payload": candidate,
+                    "revision": candidate["revision"],
+                    "updated_at": self._firestore.SERVER_TIMESTAMP,
+                },
+            )
+            return deepcopy(candidate)
+
+        return commit(transaction)
 
     def get_idempotent_response(
         self,
@@ -580,3 +735,28 @@ def create_chat_store(app_settings: Settings) -> ChatStore:
         "CHAT_STORE_BACKEND must be either 'memory' or 'firestore', "
         f"got {app_settings.chat_store_backend!r}."
     )
+
+
+def _plan_revision(plan: object) -> int | None:
+    if not isinstance(plan, dict):
+        return None
+    revision = plan.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return None
+    return revision
+
+
+def _validated_next_plan(
+    plan: dict[str, Any],
+    *,
+    expected_revision: int | None,
+) -> dict[str, Any]:
+    candidate = deepcopy(plan)
+    revision = _plan_revision(candidate)
+    next_revision = (expected_revision or 0) + 1
+    if revision != next_revision:
+        raise ValueError(
+            "Active trip plan revision must advance exactly once: "
+            f"expected payload revision {next_revision}, got {revision!r}."
+        )
+    return candidate

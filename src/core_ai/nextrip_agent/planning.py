@@ -1177,14 +1177,13 @@ def _ready_after_previous_stop(
     origin = stops[-1]
     origin_end = _minutes(origin.end_time)
     fallback = origin_end + policy.transition_buffer_minutes
-    if (
-        route_provider is None
-        or local_date is None
-        or origin.place_id == destination_id
-    ):
+    if route_provider is None or origin.place_id == destination_id:
         return fallback
+    routing_date = local_date or (
+        datetime.now(_VIETNAM_TIMEZONE).date() + timedelta(days=1)
+    )
     departure = datetime.combine(
-        local_date,
+        routing_date,
         datetime.strptime(origin.end_time, "%H:%M").time(),
         tzinfo=_VIETNAM_TIMEZONE,
     )
@@ -1245,14 +1244,26 @@ def _planning_transport_summary(
     duration_seconds = selected.get("duration_seconds")
     if not isinstance(duration_seconds, int) or duration_seconds <= 0:
         raise ValueError("planning route has no positive duration")
+    distance_meters = selected.get("distance_meters")
+    recommended_mode = payload.get("recommended_mode")
     return {
         "status": str(payload.get("status") or "unavailable"),
         "origin_place_id": origin_id,
         "destination_place_id": destination_id,
         "departure_time": departure.isoformat(),
-        "recommended_mode": payload.get("recommended_mode"),
-        "distance_meters": selected.get("distance_meters"),
+        "recommended_mode": recommended_mode,
+        "distance_meters": distance_meters,
         "duration_seconds": duration_seconds,
+        "distance_km": round(float(distance_meters) / 1000, 1)
+        if isinstance(distance_meters, (int, float))
+        else None,
+        "duration_minutes": max(1, math.ceil(duration_seconds / 60)),
+        "mode_label": {
+            "walk": "Đi bộ",
+            "bicycle": "Xe đạp",
+            "two_wheeler": "Xe máy",
+            "drive": "Ô tô/taxi",
+        }.get(str(recommended_mode), str(recommended_mode or "")),
         "provider": route.get("provider"),
         "traffic_basis": route.get("traffic_basis"),
         "traffic_aware": route.get("traffic_aware"),

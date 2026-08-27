@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol
 from loguru import logger
 from pydantic import BaseModel, Field, model_validator
 
+from src.core_ai.nextrip_agent.trip_plan import PlanMutation, PlanOperation
 from src.core_ai.nextrip_agent.weather import normalize_text
 
 
@@ -24,12 +25,16 @@ class ConversationResolution(BaseModel):
     direct_answer: str | None = Field(default=None, max_length=4000)
     summary: str | None = Field(default=None, max_length=4000)
     confidence: float = Field(default=1.0, ge=0, le=1)
+    plan_mutation: PlanMutation = Field(default_factory=PlanMutation)
 
     @model_validator(mode="after")
     def conversation_requires_an_answer(self) -> "ConversationResolution":
         if self.route == "conversation" and not (self.direct_answer or "").strip():
             raise ValueError("A conversation route requires direct_answer")
         if self.route == "travel":
+            self.direct_answer = None
+        if self.plan_mutation.operation is not PlanOperation.NONE:
+            self.route = "travel"
             self.direct_answer = None
         return self
 
@@ -181,6 +186,7 @@ def resolve_turn(
     context: ConversationContext,
     contextualizer: SupportsConversationContextualization | None,
     prior_summary: str | None = None,
+    active_trip_plan: dict[str, Any] | None = None,
 ) -> ResolvedTurn:
     """Resolve references generically; never make chat availability depend on Gemini."""
     fallback = ConversationResolution(
@@ -199,11 +205,14 @@ def resolve_turn(
             message,
         )
     try:
+        structured_context = context.to_dict()
+        if active_trip_plan is not None:
+            structured_context["active_trip_plan"] = active_trip_plan
         resolution = contextualizer.contextualize(
             message=message,
             history=history,
             prior_summary=prior_summary,
-            structured_context=context.to_dict(),
+            structured_context=structured_context,
         )
     except Exception as exc:
         logger.warning(

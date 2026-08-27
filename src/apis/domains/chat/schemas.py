@@ -6,6 +6,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from src.core_ai.nextrip_agent.constants import KbVersion
+from src.core_ai.nextrip_agent.trip_plan import (
+    ActiveTripPlan,
+    BudgetSummary,
+    PlanChange,
+)
 from src.core_ai.nextrip_agent.weather import WeatherAssessment
 
 
@@ -21,6 +26,7 @@ class ChatRequest(BaseModel):
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
     include_weather: bool | None = None
+    expected_plan_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_coordinates(self) -> "ChatRequest":
@@ -66,9 +72,13 @@ class TransportToNext(BaseModel):
     recommended_mode: str | None = None
     distance_meters: int | None = None
     duration_seconds: int | None = None
+    distance_km: float | None = Field(default=None, ge=0)
+    duration_minutes: int | None = Field(default=None, ge=1)
+    mode_label: str | None = None
     provider: str | None = None
     traffic_basis: str | None = None
     traffic_aware: bool | None = None
+    reference_time_assumed: bool = False
     degraded: bool = False
     partial: bool = False
     selection_reason: str | None = None
@@ -77,6 +87,7 @@ class TransportToNext(BaseModel):
 
 
 class ItinerarySlot(BaseModel):
+    slot_id: str | None = None
     order: int = Field(ge=1)
     start_time: str
     end_time: str
@@ -88,6 +99,7 @@ class ItinerarySlot(BaseModel):
     rationale: str | None = None
     transport_to_next: TransportToNext | None = None
     hotel_availability: dict[str, Any] | None = None
+    cost_estimate: dict[str, Any] | None = None
 
 
 class ItineraryDay(BaseModel):
@@ -117,6 +129,10 @@ class ChatResponse(BaseModel):
     clarification: Clarification | None = None
     weather: WeatherAssessment | None = None
     weather_forecast: list[WeatherAssessment] = Field(default_factory=list)
+    active_trip_plan: ActiveTripPlan | None = None
+    plan_change: PlanChange | None = None
+    budget_summary: BudgetSummary | None = None
+    nearby_suggestions: list[EvidenceItem] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):

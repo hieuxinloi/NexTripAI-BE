@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta
+import math
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -45,6 +46,10 @@ def enrich_current_data(
     *,
     travel_date: date | None,
     include_traffic: bool = True,
+    adults: int = 2,
+    children: int = 0,
+    rooms: int = 1,
+    force_hotel_refresh: bool = False,
 ) -> tuple[AgentResult, dict[str, Any]]:
     """Attach operational data without changing the public response shape.
 
@@ -57,11 +62,28 @@ def enrich_current_data(
     """
 
     if client is None:
-        return graph, {"node": "current_data", "status": "disabled"}
+        if not force_hotel_refresh:
+            return graph, {"node": "current_data", "status": "disabled"}
+        return (
+            graph.model_copy(
+                update={
+                    "evidence": _without_hotel_availability(
+                        [dict(item) for item in graph.evidence]
+                    ),
+                    "itinerary": _without_itinerary_hotel_availability(
+                        _copy_itinerary(graph.itinerary)
+                    ),
+                }
+            ),
+            {"node": "current_data", "status": "disabled"},
+        )
 
     evidence = [dict(item) for item in graph.evidence]
     facts = [dict(item) for item in graph.facts]
     itinerary = _copy_itinerary(graph.itinerary)
+    if force_hotel_refresh:
+        evidence = _without_hotel_availability(evidence)
+        itinerary = _without_itinerary_hotel_availability(itinerary)
     place_ids = _canonical_place_ids(
         [item.get("place_id") for item in evidence]
         + [
@@ -108,6 +130,9 @@ def enrich_current_data(
                 hotel_ids=missing_hotel_ids,
                 check_in=travel_date,
                 stay_nights=_stay_nights(graph.query_plan),
+                adults=adults,
+                children=children,
+                rooms=rooms,
             )
             hotel_by_id.update(
                 {
@@ -116,6 +141,32 @@ def enrich_current_data(
                     if isinstance(item, dict) and item.get("hotel_id")
                 }
             )
+            if len(missing_hotel_ids) > 1:
+                for selected_hotel_id in _itinerary_hotel_ids(itinerary):
+                    if _hotel_result_has_price(hotel_by_id.get(selected_hotel_id)):
+                        continue
+                    try:
+                        refreshed = client.hotel_availability(
+                            hotel_ids=[selected_hotel_id],
+                            check_in=travel_date,
+                            stay_nights=_stay_nights(graph.query_plan),
+                            adults=adults,
+                            children=children,
+                            rooms=rooms,
+                        )
+                    except Exception as exc:
+                        failures.append(
+                            "hotel_selected_refresh:"
+                            f"{selected_hotel_id}:{exc.__class__.__name__}"
+                        )
+                        continue
+                    hotel_by_id.update(
+                        {
+                            str(item.get("hotel_id")): item
+                            for item in refreshed.get("results", [])
+                            if isinstance(item, dict) and item.get("hotel_id")
+                        }
+                    )
             evidence = [
                 _merge_hotel_availability(item, hotel_by_id) for item in evidence
             ]
@@ -153,12 +204,19 @@ def enrich_current_data(
         except Exception as exc:
             route_failures = 1
             failures.append(f"traffic:{exc.__class__.__name__}")
-    elif include_traffic and itinerary and travel_date is not None:
+    elif include_traffic and itinerary:
+        routing_reference_date = travel_date or (
+            datetime.now(_VIETNAM_TIMEZONE).date() + timedelta(days=1)
+        )
         itinerary, route_count, route_failures = _attach_transport(
             itinerary,
             client,
-            travel_date,
+            routing_reference_date,
         )
+        if travel_date is None:
+            _mark_assumed_route_times(itinerary)
+            if "traffic_reference_time_assumed" not in warnings:
+                warnings.append("traffic_reference_time_assumed")
         if route_count:
             completed.append("traffic")
         if route_failures:
@@ -215,6 +273,31 @@ def _existing_hotel_availability(
         if place_id and isinstance(availability, dict):
             values[place_id] = availability
     return values
+
+
+def _without_hotel_availability(
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in evidence:
+        copied = dict(item)
+        attributes = copied.get("attributes")
+        if isinstance(attributes, Mapping):
+            copied_attributes = dict(attributes)
+            copied_attributes.pop("hotel_availability", None)
+            copied["attributes"] = copied_attributes
+        result.append(copied)
+    return result
+
+
+def _without_itinerary_hotel_availability(
+    itinerary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result = _copy_itinerary(itinerary)
+    for day_item in result:
+        for slot in day_item.get("slots", []):
+            slot.pop("hotel_availability", None)
+    return result
 
 
 def _canonical_place_ids(values: list[Any]) -> list[str]:
@@ -403,6 +486,39 @@ def _hotel_ids(
     return _canonical_place_ids(values)
 
 
+def _itinerary_hotel_ids(itinerary: list[dict[str, Any]]) -> list[str]:
+    return _canonical_place_ids(
+        [
+            slot.get("place_id")
+            for day_item in itinerary
+            for slot in day_item.get("slots", [])
+            if slot.get("entity_type") == "hotel"
+        ]
+    )
+
+
+def _hotel_result_has_price(result: object) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    selected_index = result.get("selected_window_index")
+    windows = result.get("windows")
+    if not isinstance(selected_index, int) or not isinstance(windows, list):
+        return False
+    if selected_index < 0 or selected_index >= len(windows):
+        return False
+    selected = windows[selected_index]
+    if not isinstance(selected, Mapping):
+        return False
+    return any(
+        isinstance(offer, Mapping)
+        and any(
+            offer.get(field) is not None
+            for field in ("total_amount", "nightly_amount", "amount", "min_amount")
+        )
+        for offer in selected.get("offers", [])
+    )
+
+
 def _stay_nights(query_plan: Mapping[str, Any]) -> int:
     duration = query_plan.get("duration_days")
     if isinstance(duration, int) and not isinstance(duration, bool):
@@ -459,13 +575,13 @@ def _attach_transport(
             destination_id = str(destination.get("place_id") or "")
             if not origin_id or not destination_id or origin_id == destination_id:
                 continue
-            if _has_usable_transport(origin, destination_id):
-                reused += 1
-                continue
             departure = _departure_at(
                 start_date + timedelta(days=max(day_number - 1, 0)),
                 str(origin.get("end_time") or "00:00"),
             )
+            if _has_usable_transport(origin, destination_id, departure):
+                reused += 1
+                continue
             jobs.append((origin, origin_id, destination_id, departure))
 
     completed = reused
@@ -503,11 +619,16 @@ def _attach_transport(
     return itinerary, completed, failed
 
 
-def _has_usable_transport(slot: Mapping[str, Any], destination_id: str) -> bool:
+def _has_usable_transport(
+    slot: Mapping[str, Any],
+    destination_id: str,
+    departure: datetime,
+) -> bool:
     value = slot.get("transport_to_next")
     return bool(
         isinstance(value, Mapping)
         and value.get("destination_place_id") == destination_id
+        and value.get("departure_time") == departure.isoformat()
         and value.get("status") in {"recommended", "available"}
         and value.get("recommended_mode")
         and isinstance(value.get("duration_seconds"), int)
@@ -619,18 +740,28 @@ def _transport_summary(
         and isinstance(route_response.get("route"), dict)
         else {}
     )
+    distance_meters = (
+        selected.get("distance_meters") if isinstance(selected, dict) else None
+    )
+    duration_seconds = (
+        selected.get("duration_seconds") if isinstance(selected, dict) else None
+    )
+    recommended_mode = payload.get("recommended_mode")
     return {
         "status": str(payload.get("status") or "unavailable"),
         "origin_place_id": origin_id,
         "destination_place_id": destination_id,
         "departure_time": departure.isoformat(),
-        "recommended_mode": payload.get("recommended_mode"),
-        "distance_meters": (
-            selected.get("distance_meters") if isinstance(selected, dict) else None
-        ),
-        "duration_seconds": (
-            selected.get("duration_seconds") if isinstance(selected, dict) else None
-        ),
+        "recommended_mode": recommended_mode,
+        "distance_meters": distance_meters,
+        "duration_seconds": duration_seconds,
+        "distance_km": round(float(distance_meters) / 1000, 1)
+        if isinstance(distance_meters, (int, float))
+        else None,
+        "duration_minutes": max(1, math.ceil(float(duration_seconds) / 60))
+        if isinstance(duration_seconds, (int, float)) and duration_seconds > 0
+        else None,
+        "mode_label": _transport_mode_label(str(recommended_mode)),
         "provider": route.get("provider"),
         "traffic_basis": route.get("traffic_basis"),
         "traffic_aware": route.get("traffic_aware"),
@@ -656,6 +787,34 @@ def _transport_summary(
     }
 
 
+def attach_itinerary_transport(
+    itinerary: list[dict[str, Any]],
+    client: SupportsCurrentData | None,
+    *,
+    start_date: date | None,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Public fail-soft route attachment used by mutable plan revisions."""
+
+    copied = _copy_itinerary(itinerary)
+    if client is None:
+        return copied, 0, 0
+    reference_date = start_date or (
+        datetime.now(_VIETNAM_TIMEZONE).date() + timedelta(days=1)
+    )
+    result, completed, failed = _attach_transport(copied, client, reference_date)
+    if start_date is None:
+        _mark_assumed_route_times(result)
+    return result, completed, failed
+
+
+def _mark_assumed_route_times(itinerary: list[dict[str, Any]]) -> None:
+    for day_item in itinerary:
+        for slot in day_item.get("slots", []):
+            route = slot.get("transport_to_next")
+            if isinstance(route, dict):
+                route["reference_time_assumed"] = True
+
+
 def _remaining_tools(
     tools: list[str],
     *,
@@ -672,4 +831,4 @@ def _remaining_tools(
     return [tool for tool in tools if tool not in satisfied]
 
 
-__all__ = ["SupportsCurrentData", "enrich_current_data"]
+__all__ = ["SupportsCurrentData", "attach_itinerary_transport", "enrich_current_data"]

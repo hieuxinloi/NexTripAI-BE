@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
-from src.apis.domains.chat.schemas import AuthenticatedChatRequest, ChatRequest, ChatResponse
+from src.apis.domains.chat.schemas import (
+    AuthenticatedChatRequest,
+    ChatRequest,
+    ChatResponse,
+)
 from src.apis.domains.chat.idempotency import IdempotencyCoordinator
 from src.apis.domains.chat.service import (
     ConversationKnowledgeBaseVersionError,
@@ -22,7 +26,7 @@ from src.infra.kb_client import KbClient
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.synthesizer import AnswerGenerationUnavailableError
 from src.config import Settings
-from src.infra.chat_store import ChatStore
+from src.infra.chat_store import ChatStore, TripPlanRevisionConflictError
 from src.security.auth import Principal, current_principal
 from src.security.rate_limit import InMemoryRateLimiter
 
@@ -125,10 +129,14 @@ def select_kb_version(
     if client_selected:
         candidates = [requested]
     else:
-        candidates = list(dict.fromkeys([
-            app_settings.active_kb_version,
-            *app_settings.kb_fallback_version_list,
-        ]))
+        candidates = list(
+            dict.fromkeys(
+                [
+                    app_settings.active_kb_version,
+                    *app_settings.kb_fallback_version_list,
+                ]
+            )
+        )
     preferred = candidates[0]
     try:
         try:
@@ -139,9 +147,13 @@ def select_kb_version(
             str(version) for version in readiness.get("ready_versions") or []
         }
     except Exception as exc:
-        logger.warning("KB readiness lookup failed error_type={}", exc.__class__.__name__)
+        logger.warning(
+            "KB readiness lookup failed error_type={}", exc.__class__.__name__
+        )
         if app_settings.environment == "production":
-            raise HTTPException(status_code=503, detail="Knowledge Base is not ready.") from exc
+            raise HTTPException(
+                status_code=503, detail="Knowledge Base is not ready."
+            ) from exc
         return preferred
     active_version = str(readiness.get("active_version") or "")
     if not client_selected and active_version in ready_versions:
@@ -171,7 +183,9 @@ async def _execute_chat(
                 user_id=principal.uid,
             )
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail="Session access denied.") from exc
+            raise HTTPException(
+                status_code=403, detail="Session access denied."
+            ) from exc
         if cached is not None:
             return ChatResponse.model_validate(cached)
 
@@ -201,20 +215,28 @@ async def _execute_chat(
     return await coordinator.run(request.session_id, key, operation)
 
 
-async def _run_worker(request: AuthenticatedChatRequest, http_request: Request) -> ChatResponse:
+async def _run_worker(
+    request: AuthenticatedChatRequest, http_request: Request
+) -> ChatResponse:
     kb_client: KbClient = http_request.app.state.kb_client
-    answer_generator: SupportsAnswerGeneration | None = http_request.app.state.answer_generator
+    answer_generator: SupportsAnswerGeneration | None = (
+        http_request.app.state.answer_generator
+    )
     worker_pool: ChatWorkerPool = http_request.app.state.chat_worker_pool
     try:
         with fail_after(http_request.app.state.settings.chat_request_timeout_seconds):
             return await worker_pool.submit(request, kb_client, answer_generator)
     except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Chat processing timed out.") from exc
+        raise HTTPException(
+            status_code=504, detail="Chat processing timed out."
+        ) from exc
     except KnowledgeBaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except KnowledgeBaseVersionMismatchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ConversationKnowledgeBaseVersionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TripPlanRevisionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AnswerGenerationUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
