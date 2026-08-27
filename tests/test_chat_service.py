@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from src.apis.domains.chat.schemas import (
@@ -10,6 +13,7 @@ from src.apis.domains.chat.schemas import (
 from src.apis.domains.chat.service import (
     _build_clarification,
     _record_grounded_place_interest,
+    _resolve_effective_travel_date,
     handle_chat,
     resolve_top_k,
 )
@@ -18,6 +22,7 @@ from src.core_ai.nextrip_agent.answer_generation import facts_for_answer
 from src.core_ai.nextrip_agent.constants import (
     supports_structured_conversation_context,
 )
+from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
 from src.infra.chat_store import InMemoryChatStore, TripPlanRevisionConflictError
@@ -37,6 +42,31 @@ def test_missing_city_builds_destination_choice_cards() -> None:
         ("Quy Nhơn", "Quy Nhơn"),
         ("Cả hai thành phố", "all"),
     ]
+
+
+def test_undated_itinerary_uses_tomorrow_as_an_explicit_assumption() -> None:
+    resolved, assumed = _resolve_effective_travel_date(
+        explicit_date=None,
+        context_date=None,
+        active_plan=None,
+        message="Len lich trinh 3 ngay o Quy Nhon",
+        now=datetime(2026, 8, 27, 17, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+    )
+
+    assert resolved == date(2026, 8, 28)
+    assert assumed is True
+
+
+def test_explicit_travel_date_is_never_marked_as_assumed() -> None:
+    resolved, assumed = _resolve_effective_travel_date(
+        explicit_date=date(2026, 9, 5),
+        context_date=None,
+        active_plan=None,
+        message="Len lich trinh 3 ngay o Quy Nhon",
+    )
+
+    assert resolved == date(2026, 9, 5)
+    assert assumed is False
 
 
 class FakeKbClient:
@@ -228,6 +258,47 @@ class FakeV8TwoDayItineraryClient(FakeV8ItineraryClient):
                 "category": "cafe",
             }
         )
+        payload["recommendations"].append(
+            {
+                "place_id": "cafe_qn_003",
+                "name": "Cafe Day Two Alternative",
+                "city": payload["recommendations"][0]["city"],
+                "entity_type": "cafe",
+                "category": "cafe",
+            }
+        )
+        payload["recommendations"].extend(
+            [
+                {
+                    "place_id": "attr_qn_002",
+                    "name": "Attraction Day Two",
+                    "city": payload["recommendations"][0]["city"],
+                    "entity_type": "attraction",
+                    "category": "attraction",
+                },
+                {
+                    "place_id": "rest_qn_001",
+                    "name": "Restaurant Day One",
+                    "city": payload["recommendations"][0]["city"],
+                    "entity_type": "restaurant",
+                    "category": "restaurant",
+                },
+                {
+                    "place_id": "rest_qn_002",
+                    "name": "Restaurant Day Two",
+                    "city": payload["recommendations"][0]["city"],
+                    "entity_type": "restaurant",
+                    "category": "restaurant",
+                },
+                {
+                    "place_id": "hotel_qn_001",
+                    "name": "Hotel Stay",
+                    "city": payload["recommendations"][0]["city"],
+                    "entity_type": "hotel",
+                    "category": "hotel",
+                },
+            ]
+        )
         payload["itinerary"].append(
             {
                 "day": 2,
@@ -246,6 +317,15 @@ class FakeV8TwoDayItineraryClient(FakeV8ItineraryClient):
             }
         )
         return payload
+
+
+class MissingHotelFollowUpContextualizer:
+    def contextualize(self, **kwargs):
+        return ConversationResolution(
+            route="travel",
+            standalone_message="Len lich trinh 2 ngay o Quy Nhon co khach san",
+            confidence=1,
+        )
 
 
 class FakeV8RouteClient(FakeKbClient):
@@ -578,6 +658,9 @@ def test_active_plan_is_not_overwritten_by_an_unrelated_recommendation() -> None
     assert stored is not None
     assert stored["revision"] == 1
     assert response.plan_change is None
+    assert response.itinerary == []
+    assert response.active_trip_plan is not None
+    assert response.active_trip_plan.revision == 1
 
 
 def test_chat_add_move_and_retime_are_local_plan_revisions() -> None:
@@ -676,6 +759,53 @@ def test_replan_day_preserves_other_days_and_their_slot_ids() -> None:
     assert second.plan_change is not None
     assert second.plan_change.operation.value == "replan_day"
     assert preserved_id in second.plan_change.preserved_slot_ids
+
+
+def test_missing_hotel_follow_up_finalizes_and_persists_a_new_plan_revision() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Len lich trinh 2 ngay o Quy Nhon",
+            session_id="missing-hotel-follow-up",
+            city="Quy Nhon",
+            kb_version="v8",
+        ),
+        FakeV8TwoDayItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert first.active_trip_plan is not None
+
+    second = handle_chat(
+        ChatRequest(
+            message="khong co khach san a",
+            session_id="missing-hotel-follow-up",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8TwoDayItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+        conversation_contextualizer=MissingHotelFollowUpContextualizer(),
+    )
+
+    stored = store.get_active_trip_plan("missing-hotel-follow-up")
+    assert second.active_trip_plan is not None
+    assert second.active_trip_plan.revision == 2
+    assert second.plan_change is not None
+    assert second.plan_change.operation.value == "replan_all"
+    assert any(
+        slot.entity_type == "hotel"
+        for day_item in second.itinerary
+        for slot in day_item.slots
+    )
+    assert all(
+        slot.cost_estimate is not None
+        for day_item in second.itinerary
+        for slot in day_item.slots
+    )
+    assert stored is not None
+    assert stored["revision"] == 2
 
 
 def test_chat_route_question_calls_current_traffic_with_canonical_ids() -> None:

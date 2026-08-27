@@ -561,6 +561,92 @@ def test_planning_fallback_does_not_repeat_a_place_to_fill_empty_days() -> None:
     assert result.itinerary == []
 
 
+def test_overnight_fallback_cannot_complete_without_a_selectable_hotel() -> None:
+    candidates = [
+        item for item in _candidates() if item["entity_type"] != "hotel"
+    ]
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+        itinerary=[
+            {
+                "day": 1,
+                "slots": [{"place_id": "stale_upstream_itinerary"}],
+            }
+        ],
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "unavailable"
+    assert trace["reason"] == "fallback_plan_invalid"
+    assert result.itinerary == []
+
+
+def test_multiday_fallback_requires_an_activity_and_meal_each_day() -> None:
+    candidates = [
+        item
+        for item in _candidates()
+        if item["entity_type"] not in {"attraction", "nightlife"}
+    ]
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 2},
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 2 ngày 1 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "unavailable"
+    assert trace["reason"] == "fallback_plan_invalid"
+    assert result.itinerary == []
+
+
+def test_overnight_fallback_rejects_only_unavailable_hotels() -> None:
+    candidates = _candidates()
+    hotel = next(item for item in candidates if item["entity_type"] == "hotel")
+    hotel["attributes"]["hotel_availability"] = {
+        "selected_window_index": None,
+        "windows": [{"availability": "unavailable", "offers": []}],
+    }
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 2},
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 2 ngày 1 đêm",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert trace["status"] == "unavailable"
+    assert trace["reason"] == "fallback_plan_invalid"
+    assert result.itinerary == []
+
+
 def test_planning_fallback_skips_a_restaurant_closed_during_lunch() -> None:
     candidates = [
         _candidate("attr_1", "attraction", indoor=True),

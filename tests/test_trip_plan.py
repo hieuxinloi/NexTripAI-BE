@@ -1,6 +1,7 @@
 from datetime import date
 
 from src.core_ai.nextrip_agent.trip_plan import (
+    _hotel_cost,
     PlanMutation,
     PlanOperation,
     apply_plan_mutation,
@@ -9,6 +10,38 @@ from src.core_ai.nextrip_agent.trip_plan import (
     rank_nearby_candidates,
     resolve_plan_mutation,
 )
+
+
+def test_hotel_cost_keeps_the_selected_stay_dates() -> None:
+    estimate = _hotel_cost(
+        {
+            "selected_window_index": 1,
+            "windows": [
+                {"offers": []},
+                {
+                    "requested_check_in": "2026-08-28",
+                    "fallback_offset_days": 1,
+                    "check_in": "2026-08-29",
+                    "check_out": "2026-08-31",
+                    "offers": [
+                        {
+                            "nightly_amount": 750_000,
+                            "currency": "VND",
+                            "seller": "Trivago",
+                        }
+                    ],
+                },
+            ],
+        },
+        stay_nights=2,
+    )
+
+    assert estimate is not None
+    assert estimate["amount_min"] == 1_500_000
+    assert estimate["requested_check_in"] == "2026-08-28"
+    assert estimate["check_in"] == "2026-08-29"
+    assert estimate["check_out"] == "2026-08-31"
+    assert estimate["fallback_offset_days"] == 1
 
 
 def _itinerary():
@@ -404,3 +437,73 @@ def test_vietnamese_move_intent_separates_source_and_destination():
     assert mutation.target_order == 2
     assert mutation.destination_day == 2
     assert mutation.destination_order == 1
+
+
+def test_sparse_replan_preserves_rich_price_attributes() -> None:
+    priced_evidence = _evidence()
+    priced_evidence[1]["attributes"].update(
+        {"price_per_person_min": 60_000, "price_per_person_max": 90_000}
+    )
+    first = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=priced_evidence,
+        city="Quy NhÆ¡n",
+        start_date=date(2026, 9, 1),
+        duration_days=1,
+        operation=PlanOperation.CREATE,
+        mutation=PlanMutation(adults=2, rooms=1),
+    )
+
+    sparse_evidence = [
+        {
+            "place_id": item["place_id"],
+            "name": item["name"],
+            "city": item["city"],
+            "entity_type": item["entity_type"],
+            "attributes": {},
+        }
+        for item in priced_evidence
+    ]
+    replanned = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=sparse_evidence,
+        city="Quy NhÆ¡n",
+        start_date=date(2026, 9, 1),
+        duration_days=1,
+        operation=PlanOperation.REPLAN_ALL,
+        previous=first,
+    )
+
+    places = {item["place_id"]: item for item in replanned.selected_places}
+    assert places["attr_qn_001"]["attributes"]["ticket_price_adult"] == 50_000
+    assert places["rest_qn_001"]["attributes"]["price_per_person_min"] == 60_000
+    assert replanned.itinerary[0]["slots"][0]["cost_estimate"]["amount_min"] == 100_000
+    assert replanned.itinerary[0]["slots"][1]["cost_estimate"]["amount_min"] == 120_000
+    assert replanned.budget_summary is not None
+    assert replanned.budget_summary.status == "partial"
+    assert "transport_fares_not_available" in replanned.budget_summary.exclusions
+
+
+def test_budget_does_not_claim_within_budget_without_mandatory_hotel_price() -> None:
+    evidence = _evidence()
+    evidence[1]["attributes"].update(
+        {"price_per_person_min": 60_000, "price_per_person_max": 90_000}
+    )
+    plan = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=evidence,
+        city="Quy NhÆ¡n",
+        start_date=date(2026, 9, 1),
+        duration_days=3,
+        operation=PlanOperation.CREATE,
+        mutation=PlanMutation(budget_vnd=5_000_000, adults=2, rooms=1),
+    )
+
+    assert plan.budget_summary is not None
+    assert plan.budget_summary.estimated_max == 280_000
+    assert plan.budget_summary.status == "partial"
+    assert plan.budget_summary.within_budget is None
+    assert plan.budget_summary.remaining_min is None
+    assert plan.budget_summary.remaining_max is None
+    assert "mandatory_hotel_stay_not_priced" in plan.budget_summary.exclusions
+    assert plan.status == "partial"

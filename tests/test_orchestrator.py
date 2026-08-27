@@ -54,6 +54,61 @@ class FailingKbClient:
         raise AssertionError("Weather-only route must not call GraphRAG")
 
 
+class CandidateCoverageKbClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        self.calls.append({"query": query, "top_k": top_k})
+        normalized = query.casefold()
+        if "khách sạn" in normalized:
+            entity_type = "hotel"
+            prefix = "hotel"
+        elif "nhà hàng" in normalized:
+            entity_type = "restaurant"
+            prefix = "rest"
+        elif "tham quan" in normalized:
+            entity_type = "attraction"
+            prefix = "attr"
+        else:
+            entity_type = "cafe"
+            prefix = "cafe"
+        return {
+            "kb_version": kb_version,
+            "answer_type": "recommendation",
+            "recommendations": [
+                {
+                    "place_id": f"{prefix}_qn_{index:03d}",
+                    "name": f"{entity_type} {index}",
+                    "city": "Quy Nhơn",
+                    "entity_type": entity_type,
+                    "category": entity_type,
+                    "attributes": {
+                        "opening_hours_open": "06:00",
+                        "opening_hours_close": "23:00",
+                        **({"indoor": True} if entity_type == "attraction" else {}),
+                    },
+                }
+                for index in range(1, top_k + 1)
+            ],
+            "facts": [],
+            "evidence": [],
+            "missing_fields": [],
+            "query_plan": {"intent": "plan_candidates", "duration_days": 3},
+            "matched_paths": [],
+            "constraint_results": [],
+            "required_tools": [],
+            "trace": [],
+        }
+
+
 class FakeWeatherClient:
     configured = True
 
@@ -126,6 +181,52 @@ def test_orchestrator_routes_itinerary_through_graph_weather_and_planning() -> N
     assert plan.run_graph is True
     assert plan.run_weather is True
     assert plan.run_planning is True
+
+
+def test_orchestrator_supplements_generic_results_with_required_entity_coverage() -> (
+    None
+):
+    kb_client = CandidateCoverageKbClient()
+
+    result = TravelOrchestrator(kb_client, None).run(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        session_id="balanced-planning-candidates",
+        city="Quy Nhơn",
+        entity_types=None,
+        top_k=5,
+        kb_version="v8",
+        travel_date=None,
+        include_weather=False,
+        latitude=None,
+        longitude=None,
+    )
+
+    coverage = next(
+        item for item in result.trace if item["node"] == "planning_candidate_coverage"
+    )
+    assert coverage["status"] == "completed"
+    assert {item["requirement"] for item in coverage["requests"]} == {
+        "activity",
+        "meal",
+        "hotel",
+    }
+    assert coverage["missing"] == []
+    assert result.planning_trace["status"] == "completed"
+    assert all(
+        any(slot["role"] == "activity" for slot in day["slots"])
+        and any(slot["role"] == "meal" for slot in day["slots"])
+        for day in result.graph.itinerary
+    )
+    hotel_slots = [
+        (day["day"], slot["role"], slot["place_id"])
+        for day in result.graph.itinerary
+        for slot in day["slots"]
+        if slot["entity_type"] == "hotel"
+    ]
+    assert hotel_slots == [
+        (1, "check_in", "hotel_qn_001"),
+        (3, "check_out", "hotel_qn_001"),
+    ]
 
 
 @pytest.mark.parametrize("message", ["hello", "Xin chào!", "Hi NexTrip"])

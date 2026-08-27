@@ -124,10 +124,19 @@ def enrich_current_data(
     missing_hotel_ids = [
         hotel_id for hotel_id in hotel_ids if hotel_id not in hotel_by_id
     ]
-    if missing_hotel_ids and travel_date is not None:
+    selected_hotel_ids = _itinerary_hotel_ids(itinerary)
+    unpriced_selected_hotel_ids = [
+        hotel_id
+        for hotel_id in selected_hotel_ids
+        if not _hotel_result_has_price(hotel_by_id.get(hotel_id))
+    ]
+    lookup_hotel_ids = list(
+        dict.fromkeys([*missing_hotel_ids, *unpriced_selected_hotel_ids])
+    )
+    if lookup_hotel_ids and travel_date is not None:
         try:
             response = client.hotel_availability(
-                hotel_ids=missing_hotel_ids,
+                hotel_ids=lookup_hotel_ids,
                 check_in=travel_date,
                 stay_nights=_stay_nights(graph.query_plan),
                 adults=adults,
@@ -141,8 +150,8 @@ def enrich_current_data(
                     if isinstance(item, dict) and item.get("hotel_id")
                 }
             )
-            if len(missing_hotel_ids) > 1:
-                for selected_hotel_id in _itinerary_hotel_ids(itinerary):
+            if len(lookup_hotel_ids) > 1:
+                for selected_hotel_id in selected_hotel_ids:
                     if _hotel_result_has_price(hotel_by_id.get(selected_hotel_id)):
                         continue
                     try:

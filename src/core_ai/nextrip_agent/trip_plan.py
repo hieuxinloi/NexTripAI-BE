@@ -428,6 +428,7 @@ def build_active_trip_plan(
     operation: PlanOperation,
     previous: ActiveTripPlan | None = None,
     mutation: PlanMutation | None = None,
+    travel_date_assumed: bool | None = None,
 ) -> ActiveTripPlan:
     now = datetime.now(timezone.utc)
     plan_id = previous.plan_id if previous is not None else f"trip_{uuid4().hex}"
@@ -458,6 +459,8 @@ def build_active_trip_plan(
             ) + mutation.children
         if mutation.rooms is not None:
             constraints["rooms"] = mutation.rooms
+    if travel_date_assumed is not None:
+        constraints["travel_date_assumed"] = travel_date_assumed
 
     days = _assign_stable_slot_ids(
         itinerary,
@@ -470,9 +473,9 @@ def build_active_trip_plan(
         selected_places,
         budget_vnd=_optional_int(constraints.get("budget_vnd")),
         party_size=_optional_int(constraints.get("party_size")) or 2,
-        stay_nights=max(duration_days - 1, 1),
+        stay_nights=max(duration_days - 1, 0),
     )
-    missing_price = bool(budget_summary.missing_place_ids)
+    missing_price = budget_summary.status != "complete"
     has_unavailable_route = _has_missing_or_unavailable_route(days)
     status: Literal["complete", "partial", "draft"] = (
         "partial" if missing_price or has_unavailable_route else "complete"
@@ -971,10 +974,20 @@ def annotate_itinerary_costs(
     estimable = 0
     missing: list[str] = []
     counted_hotels: set[str] = set()
+    mandatory_hotel_present = False
+    mandatory_hotel_priced = False
+    transport_fares_unpriced = any(
+        len(day_item.get("slots", [])) > 1 for day_item in days
+    )
     for day_item in days:
         for slot in day_item.get("slots", []):
             place_id = str(slot.get("place_id") or "")
             place = by_id.get(place_id, {})
+            is_stay_hotel = (
+                slot.get("entity_type") == "hotel" and slot.get("role") != "check_out"
+            )
+            if is_stay_hotel:
+                mandatory_hotel_present = True
             estimate = _cost_estimate(
                 slot,
                 place,
@@ -1000,13 +1013,27 @@ def annotate_itinerary_costs(
             priced += 1
             min_total += minimum
             max_total += maximum
+            if is_stay_hotel:
+                mandatory_hotel_priced = True
+
+    mandatory_stay_unpriced = stay_nights > 0 and not mandatory_hotel_priced
+    if stay_nights > 0 and not mandatory_hotel_present:
+        estimable += 1
+    if transport_fares_unpriced:
+        estimable += 1
 
     if priced == 0:
         status: Literal["complete", "partial", "unavailable"] = "unavailable"
         estimated_min = None
         estimated_max = None
     else:
-        status = "complete" if not missing else "partial"
+        status = (
+            "complete"
+            if not missing
+            and not mandatory_stay_unpriced
+            and not transport_fares_unpriced
+            else "partial"
+        )
         estimated_min = min_total
         estimated_max = max_total
     within_budget = None
@@ -1016,6 +1043,8 @@ def annotate_itinerary_costs(
         budget_vnd is not None
         and estimated_min is not None
         and estimated_max is not None
+        and not mandatory_stay_unpriced
+        and not transport_fares_unpriced
     ):
         if estimated_min > budget_vnd:
             within_budget = False
@@ -1023,9 +1052,13 @@ def annotate_itinerary_costs(
             within_budget = True
         remaining_min = budget_vnd - estimated_max
         remaining_max = budget_vnd - estimated_min
-    exclusions = ["transport_fares_not_available"]
+    exclusions: list[str] = []
+    if transport_fares_unpriced:
+        exclusions.append("transport_fares_not_available")
     if missing:
         exclusions.append("places_without_numeric_price")
+    if mandatory_stay_unpriced:
+        exclusions.append("mandatory_hotel_stay_not_priced")
     return days, BudgetSummary(
         status=status,
         party_size=party_size,
@@ -1153,13 +1186,17 @@ def _selected_place_snapshot(
                 if item.get("place_id")
             }
         )
-    by_id.update(
-        {
-            str(item.get("place_id")): _compact_place(item)
-            for item in evidence
-            if item.get("place_id")
-        }
-    )
+    for item in evidence:
+        place_id = str(item.get("place_id") or "")
+        if not place_id:
+            continue
+        incoming = _compact_place(item)
+        existing = by_id.get(place_id)
+        by_id[place_id] = (
+            _merge_place_snapshot(existing, incoming)
+            if existing is not None
+            else incoming
+        )
     return [by_id[place_id] for place_id in sorted(ids) if place_id in by_id]
 
 
@@ -1179,6 +1216,58 @@ def _compact_place(item: Mapping[str, Any]) -> dict[str, Any]:
         )
         if item.get(key) is not None
     }
+
+
+def _merge_place_snapshot(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge fresh evidence without discarding richer persisted attributes."""
+
+    merged = deepcopy(dict(existing))
+    for key, value in incoming.items():
+        previous = merged.get(key)
+        if key == "attributes" and isinstance(value, Mapping):
+            previous_attributes = previous if isinstance(previous, Mapping) else {}
+            merged[key] = _merge_place_attributes(previous_attributes, value)
+        elif isinstance(value, Mapping) and isinstance(previous, Mapping):
+            merged[key] = _deep_merge_mapping(previous, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _merge_place_attributes(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(dict(existing))
+    for key, value in incoming.items():
+        # These envelopes represent one operational context and must be
+        # replaced atomically when a fresher context is available.
+        if key in {"current", "hotel_availability"}:
+            merged[key] = deepcopy(value)
+            continue
+        previous = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(previous, Mapping):
+            merged[key] = _deep_merge_mapping(previous, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _deep_merge_mapping(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(dict(existing))
+    for key, value in incoming.items():
+        previous = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(previous, Mapping):
+            merged[key] = _deep_merge_mapping(previous, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 def _cost_estimate(
@@ -1265,6 +1354,10 @@ def _hotel_cost(value: object, *, stay_nights: int) -> dict[str, Any] | None:
         "basis": basis,
         "nightly_amount": _money(offer.get("nightly_amount") or offer.get("amount")),
         "stay_nights": stay_nights,
+        "requested_check_in": window.get("requested_check_in"),
+        "check_in": window.get("check_in"),
+        "check_out": window.get("check_out"),
+        "fallback_offset_days": window.get("fallback_offset_days"),
         "seller": offer.get("seller"),
         "observed_at": offer.get("observed_at"),
         "stale_after": offer.get("stale_after"),

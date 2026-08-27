@@ -158,6 +158,12 @@ class PlanningPolicy(BaseModel):
     cafe_duration_minutes: int = Field(default=60, ge=20, le=180)
     rest_duration_minutes: int = Field(default=60, ge=20, le=240)
     max_unrequested_anchor_distance_km: float = Field(default=30.0, gt=0, le=200)
+    full_coverage_min_days: int = Field(default=2, ge=1, le=30)
+    activity_candidates_per_day: int = Field(default=1, ge=1, le=4)
+    meal_candidates_per_day: int = Field(default=1, ge=1, le=4)
+    rest_break_candidates_per_trip: int = Field(default=1, ge=0, le=10)
+    hotel_candidate_options: int = Field(default=3, ge=1, le=10)
+    supplemental_candidate_limit: int = Field(default=10, ge=1, le=20)
 
 
 DEFAULT_PLANNING_POLICY = PlanningPolicy()
@@ -246,7 +252,7 @@ def planning_agent_node(
         return graph, {"node": "planning", "status": "skipped"}
 
     duration_days = requested_itinerary_duration_days(message, graph.query_plan)
-    duration_nights = _duration_nights(message, duration_days)
+    duration_nights = requested_itinerary_duration_nights(message, duration_days)
     resolved_city = city or _single_candidate_city(graph.evidence)
     if resolved_city is None:
         missing = list(dict.fromkeys([*graph.missing_fields, "city"]))
@@ -274,7 +280,7 @@ def planning_agent_node(
             item for item in candidates if item.get("entity_type") != "nightlife"
         ]
     if not candidates:
-        return graph, {
+        return graph.model_copy(update={"itinerary": []}), {
             "node": "planning",
             "status": "unavailable",
             "reason": "no_grounded_candidates_in_city",
@@ -307,7 +313,8 @@ def planning_agent_node(
         planning_warnings.append("no_plannable_candidates")
         updated = graph.model_copy(
             update={
-                "warnings": list(dict.fromkeys([*graph.warnings, *planning_warnings]))
+                "warnings": list(dict.fromkeys([*graph.warnings, *planning_warnings])),
+                "itinerary": [],
             }
         )
         return updated, {
@@ -349,7 +356,7 @@ def planning_agent_node(
                 source = "gemini_structured"
             _validate_plan(
                 proposed,
-                candidates=candidates,
+                candidates=planner_candidates,
                 city=resolved_city,
                 duration_days=duration_days,
                 duration_nights=duration_nights,
@@ -383,12 +390,11 @@ def planning_agent_node(
             )
             _validate_plan(
                 plan,
-                candidates=candidates,
+                candidates=planner_candidates,
                 city=resolved_city,
                 duration_days=duration_days,
                 duration_nights=duration_nights,
                 weather_forecast=weather_forecast,
-                require_full_coverage=False,
                 travel_date=travel_date,
                 policy=policy,
             )
@@ -406,7 +412,8 @@ def planning_agent_node(
                 update={
                     "warnings": list(
                         dict.fromkeys([*graph.warnings, *planning_warnings])
-                    )
+                    ),
+                    "itinerary": [],
                 }
             )
             return updated, {
@@ -457,7 +464,7 @@ def requested_itinerary_duration_days(
     return min(int(match.group(1)), 30) if match else 1
 
 
-def _duration_nights(message: str, duration_days: int) -> int:
+def requested_itinerary_duration_nights(message: str, duration_days: int) -> int:
     match = re.search(r"\b(\d{1,2})\s*dem\b", normalize_text(message))
     if match:
         return min(int(match.group(1)), max(duration_days, 1))
@@ -502,8 +509,10 @@ def _validate_plan(
     roles: list[ItineraryRole] = []
     role_locations: list[tuple[int, PlannedStop]] = []
     used_non_hotel_places: set[str] = set()
-    activity_candidate_count = sum(
-        item.get("entity_type") in {"attraction", "nightlife"} for item in candidates
+    full_trip_coverage = require_full_coverage and _requires_full_trip_coverage(
+        duration_days,
+        duration_nights,
+        policy,
     )
     for day in plan.days:
         day_weather = (
@@ -552,47 +561,34 @@ def _validate_plan(
             roles.append(stop.role)
             day_roles.append(stop.role)
             role_locations.append((day.day, stop))
-        if require_full_coverage and ItineraryRole.MEAL not in day_roles:
+        if full_trip_coverage and ItineraryRole.MEAL not in day_roles:
             raise ValueError("itinerary_daily_meal_missing")
-        if (
-            require_full_coverage
-            and activity_candidate_count >= duration_days
-            and ItineraryRole.ACTIVITY not in day_roles
-        ):
+        if full_trip_coverage and ItineraryRole.ACTIVITY not in day_roles:
             raise ValueError("itinerary_daily_activity_missing")
-    if (
-        require_full_coverage
-        and any(
-            item.get("entity_type") in {"attraction", "nightlife"}
-            for item in candidates
-        )
-        and ItineraryRole.ACTIVITY not in roles
-    ):
+    if full_trip_coverage and ItineraryRole.ACTIVITY not in roles:
         raise ValueError("itinerary_activity_missing")
     if (
-        require_full_coverage
+        full_trip_coverage
         and ItineraryRole.CAFE_BREAK not in roles
         and ItineraryRole.REST not in roles
     ):
         raise ValueError("itinerary_rest_missing")
-    if (
-        require_full_coverage
-        and duration_nights > 0
-        and any(
-            item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
-            for item in candidates
-        )
-        and ItineraryRole.CHECK_IN not in roles
-    ):
-        raise ValueError("itinerary_accommodation_missing")
     _validate_hotel_lifecycle(
         role_locations,
         candidates=candidates,
         duration_days=duration_days,
         duration_nights=duration_nights,
-        require_full_coverage=require_full_coverage,
+        require_full_coverage=full_trip_coverage,
         policy=policy,
     )
+
+
+def _requires_full_trip_coverage(
+    duration_days: int,
+    duration_nights: int,
+    policy: PlanningPolicy,
+) -> bool:
+    return duration_nights > 0 or duration_days >= policy.full_coverage_min_days
 
 
 def _validate_hotel_lifecycle(
@@ -604,10 +600,16 @@ def _validate_hotel_lifecycle(
     require_full_coverage: bool,
     policy: PlanningPolicy,
 ) -> None:
-    if duration_nights <= 0 or not any(
-        item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
+    if duration_nights <= 0:
+        return
+    selectable_hotels = [
+        item
         for item in candidates
-    ):
+        if item.get("entity_type") == "hotel" and _hotel_candidate_is_selectable(item)
+    ]
+    if not selectable_hotels:
+        if require_full_coverage:
+            raise ValueError("itinerary_selectable_hotel_missing")
         return
     check_ins = [
         (day, stop)
@@ -630,6 +632,8 @@ def _validate_hotel_lifecycle(
         for item in candidates
         if str(item.get("place_id")) == check_ins[0][1].place_id
     )
+    if not _hotel_candidate_is_selectable(stay_hotel):
+        raise ValueError("itinerary_stay_hotel_unavailable")
     check_in_earliest = _hotel_policy_minutes(
         stay_hotel,
         field="check_in_time",
@@ -1816,4 +1820,5 @@ __all__ = [
     "is_itinerary_request",
     "planning_agent_node",
     "requested_itinerary_duration_days",
+    "requested_itinerary_duration_nights",
 ]

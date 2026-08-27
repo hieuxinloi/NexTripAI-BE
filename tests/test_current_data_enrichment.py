@@ -276,6 +276,31 @@ def test_force_hotel_refresh_discards_stale_occupancy_context() -> None:
     assert availability["windows"][0]["offers"][0]["total_amount"] == 2_400_000
 
 
+def test_selected_hotel_without_price_is_refreshed_without_force_flag() -> None:
+    graph = _graph()
+    graph.evidence[0]["attributes"]["hotel_availability"] = {
+        "hotel_id": "hotel_qn_001",
+        "selected_window_index": 0,
+        "windows": [{"availability": "available", "offers": []}],
+    }
+    client = RefreshedOccupancyCurrentData()
+
+    result, trace = enrich_current_data(
+        graph,
+        client,
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+        adults=2,
+        rooms=1,
+    )
+
+    assert client.hotel_request is not None
+    assert client.hotel_request["hotel_ids"] == ["hotel_qn_001"]
+    availability = result.evidence[0]["attributes"]["hotel_availability"]
+    assert availability["windows"][0]["offers"][0]["total_amount"] == 2_400_000
+    assert trace["completed"] == ["places", "hotel_availability"]
+
+
 def test_postplanning_enrichment_reuses_a_route_already_computed_by_scheduler() -> None:
     enriched, _ = enrich_current_data(
         _graph(),

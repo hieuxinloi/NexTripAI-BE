@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date, datetime, timedelta
 from time import perf_counter
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -33,6 +35,7 @@ from src.core_ai.nextrip_agent.conversation import (
     resolve_turn,
 )
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
+from src.core_ai.nextrip_agent.planning import is_itinerary_request
 from src.core_ai.nextrip_agent.schemas import AgentResult
 from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
 from src.core_ai.nextrip_agent.trip_plan import (
@@ -58,6 +61,7 @@ from src.infra.weather import OpenMeteoWeatherClient
 
 DEFAULT_TOP_K = 5
 TYPED_QUERY_RESULT_CEILING = 20
+_VIETNAM_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 class KnowledgeBaseUnavailableError(RuntimeError):
@@ -145,6 +149,40 @@ def resolve_top_k(request: ChatRequest) -> int:
     if is_typed_kb_version(request.kb_version):
         return TYPED_QUERY_RESULT_CEILING
     return DEFAULT_TOP_K
+
+
+def _resolve_effective_travel_date(
+    *,
+    explicit_date: date | None,
+    context_date: date | None,
+    active_plan: ActiveTripPlan | None,
+    message: str,
+    now: datetime | None = None,
+) -> tuple[date | None, bool]:
+    """Resolve one date context for planning, dynamic prices, hours and routes.
+
+    An undated itinerary starts tomorrow so the system can produce a usable
+    hotel quote instead of silently omitting accommodation prices. The
+    assumption is persisted in plan constraints and exposed by the frontend.
+    """
+
+    if explicit_date is not None:
+        return explicit_date, False
+    if context_date is not None:
+        return context_date, False
+    if active_plan is not None and active_plan.start_date is not None:
+        return (
+            active_plan.start_date,
+            bool(active_plan.constraints.get("travel_date_assumed")),
+        )
+    if not is_itinerary_request(message, {}):
+        return None, False
+    reference = now or datetime.now(_VIETNAM_TIMEZONE)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=_VIETNAM_TIMEZONE)
+    else:
+        reference = reference.astimezone(_VIETNAM_TIMEZONE)
+    return reference.date() + timedelta(days=1), True
 
 
 def handle_chat(
@@ -351,6 +389,12 @@ def handle_chat(
         )
         return response
 
+    effective_travel_date, travel_date_assumed = _resolve_effective_travel_date(
+        explicit_date=request.travel_date,
+        context_date=context.travel_date,
+        active_plan=active_plan,
+        message=graph_message,
+    )
     orchestration = TravelOrchestrator(
         kb_client,
         weather_client,
@@ -363,13 +407,12 @@ def handle_chat(
         entity_types=effective_entity_types,
         top_k=top_k,
         kb_version=request.kb_version,
-        travel_date=request.travel_date or context.travel_date,
+        travel_date=effective_travel_date,
         include_weather=request.include_weather,
         latitude=request.latitude,
         longitude=request.longitude,
         conversation_context=kb_conversation_context,
     )
-    effective_travel_date = request.travel_date or context.travel_date
     active_constraints = active_plan.constraints if active_plan is not None else {}
     agent_result, current_data_trace = enrich_current_data(
         orchestration.graph,
@@ -540,6 +583,11 @@ def handle_chat(
         active_plan is None
         or plan_mutation.operation
         in {PlanOperation.REPLAN_ALL, PlanOperation.REPLAN_DAY}
+        or (
+            active_plan is not None
+            and plan_mutation.operation is PlanOperation.NONE
+            and orchestration.plan.run_planning
+        )
     ):
         operation = PlanOperation.CREATE
         itinerary_for_revision = agent_result.itinerary
@@ -598,9 +646,7 @@ def handle_chat(
             itinerary=itinerary_for_revision,
             evidence=evidence_for_revision,
             city=effective_city or _itinerary_city(agent_result.itinerary),
-            start_date=(
-                active_plan.start_date if active_plan else effective_travel_date
-            ),
+            start_date=effective_travel_date,
             duration_days=(
                 active_plan.duration_days
                 if active_plan is not None
@@ -609,6 +655,7 @@ def handle_chat(
             operation=operation,
             previous=active_plan,
             mutation=plan_mutation,
+            travel_date_assumed=travel_date_assumed,
         )
         changed_slot_ids = (
             _slot_ids_for_day(response_active_plan.itinerary, target_day or 1)
@@ -639,8 +686,23 @@ def handle_chat(
             user_id=user_id,
         )
         agent_result = agent_result.model_copy(
-            update={"itinerary": response_active_plan.itinerary}
+            update={
+                "evidence": response_active_plan.selected_places,
+                "itinerary": response_active_plan.itinerary,
+            }
         )
+    elif (
+        active_plan is not None
+        and plan_mutation.operation is PlanOperation.NONE
+        and agent_result.itinerary
+    ):
+        # A non-planning follow-up may still receive an itinerary-shaped KB
+        # payload. Returning that raw schedule would display an unversioned
+        # "ghost" plan beside the persisted active revision, without the cost
+        # annotations added by ``build_active_trip_plan``. Keep the unrelated
+        # response independent and leave the active plan untouched.
+        response_active_plan = active_plan
+        agent_result = agent_result.model_copy(update={"itinerary": []})
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
     nearby_suggestions = [
         EvidenceItem.model_validate(item) for item in nearby_suggestion_rows
@@ -658,6 +720,16 @@ def handle_chat(
         answer_context["budget_summary"] = (
             response_active_plan.budget_summary.model_dump(mode="json")
         )
+    if response_active_plan is not None and response_active_plan.start_date is not None:
+        answer_context["trip_context"] = {
+            "start_date": response_active_plan.start_date.isoformat(),
+            "start_date_assumed": bool(
+                response_active_plan.constraints.get("travel_date_assumed")
+            ),
+            "duration_days": response_active_plan.duration_days,
+            "party_size": response_active_plan.constraints.get("party_size", 2),
+            "rooms": response_active_plan.constraints.get("rooms", 1),
+        }
     synthesis = synthesize_answer(
         question=request.message,
         kb_version=request.kb_version,
@@ -678,6 +750,13 @@ def handle_chat(
         orchestration.weather_trace,
         orchestration.planning_trace,
         current_data_trace,
+        {
+            "node": "travel_date_context",
+            "status": "assumed" if travel_date_assumed else "resolved",
+            "travel_date": effective_travel_date.isoformat()
+            if effective_travel_date
+            else None,
+        },
         synthesis.trace,
     ]
     if response_active_plan is not None:
@@ -748,9 +827,10 @@ def handle_chat(
             "place_ids": [item.place_id for item in evidence],
             "referenced_entities": _referenced_entities(evidence),
             "weather_suitability": weather.suitability if weather else None,
-            "travel_date": (request.travel_date or context.travel_date).isoformat()
-            if (request.travel_date or context.travel_date)
+            "travel_date": effective_travel_date.isoformat()
+            if effective_travel_date
             else None,
+            "travel_date_assumed": travel_date_assumed,
             "itinerary": agent_result.itinerary,
             "active_trip_plan": response_active_plan.model_dump(mode="json")
             if response_active_plan

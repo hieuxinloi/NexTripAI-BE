@@ -15,10 +15,13 @@ from src.core_ai.nextrip_agent.current_data import (
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.knowledge import SupportsKbSearch
 from src.core_ai.nextrip_agent.planning import (
+    DEFAULT_PLANNING_POLICY,
+    PlanningPolicy,
     SupportsItineraryPlanning,
     is_itinerary_request,
     planning_agent_node,
     requested_itinerary_duration_days,
+    requested_itinerary_duration_nights,
 )
 from src.core_ai.nextrip_agent.schemas import AgentResult
 from src.core_ai.nextrip_agent.weather import (
@@ -108,6 +111,15 @@ class OrchestratedResult:
     trace: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class _CandidateCoverageRequirement:
+    name: str
+    accepted_entity_types: frozenset[str]
+    query_entity_type: str
+    minimum: int
+    query_label: str
+
+
 def build_orchestration_plan(
     *,
     message: str,
@@ -176,11 +188,13 @@ class TravelOrchestrator:
         weather_client: OpenMeteoWeatherClient | None,
         planning_agent: SupportsItineraryPlanning | None = None,
         current_data_client: SupportsCurrentData | None = None,
+        planning_policy: PlanningPolicy = DEFAULT_PLANNING_POLICY,
     ) -> None:
         self.kb_client = kb_client
         self.weather_client = weather_client
         self.planning_agent = planning_agent
         self.current_data_client = current_data_client
+        self.planning_policy = planning_policy
 
     def run(
         self,
@@ -307,6 +321,17 @@ class TravelOrchestrator:
             )
 
         if plan.run_planning:
+            graph, candidate_coverage_trace = self._supplement_planning_candidates(
+                graph,
+                message=message,
+                session_id=session_id,
+                city=effective_city,
+                top_k=graph_top_k,
+                kb_version=kb_version,
+                conversation_context=conversation_context,
+                weather_forecast=weather_forecast,
+            )
+            trace.append(candidate_coverage_trace)
             graph, preplanning_current_trace = enrich_current_data(
                 graph,
                 self.current_data_client,
@@ -335,6 +360,7 @@ class TravelOrchestrator:
                 ),
                 route_provider=self.current_data_client,
                 travel_date=travel_date,
+                policy=self.planning_policy,
             )
 
         return OrchestratedResult(
@@ -346,6 +372,121 @@ class TravelOrchestrator:
             planning_trace=planning_trace,
             trace=trace,
         )
+
+    def _supplement_planning_candidates(
+        self,
+        graph: AgentResult,
+        *,
+        message: str,
+        session_id: str,
+        city: str | None,
+        top_k: int,
+        kb_version: KbVersion,
+        conversation_context: dict[str, Any] | None,
+        weather_forecast: list[WeatherAssessment],
+    ) -> tuple[AgentResult, dict[str, Any]]:
+        duration_days = requested_itinerary_duration_days(message, graph.query_plan)
+        duration_nights = requested_itinerary_duration_nights(
+            message,
+            duration_days,
+        )
+        requirements = _candidate_coverage_requirements(
+            duration_days=duration_days,
+            duration_nights=duration_nights,
+            policy=self.planning_policy,
+        )
+        if not requirements or graph.error:
+            return graph, {
+                "node": "planning_candidate_coverage",
+                "status": "skipped" if not requirements else "unavailable",
+                "duration_days": duration_days,
+                "duration_nights": duration_nights,
+            }
+
+        evidence = list(graph.evidence)
+        requests: list[dict[str, Any]] = []
+        rainy_trip = any(item.suitability == "unsuitable" for item in weather_forecast)
+        for requirement in requirements:
+            before = _count_eligible_candidates(
+                evidence,
+                requirement,
+                city=city,
+            )
+            if before >= requirement.minimum:
+                continue
+            query = _supplemental_candidate_query(
+                requirement,
+                message=message,
+                indoor_only=rainy_trip and requirement.name == "activity",
+            )
+            request_top_k = min(
+                top_k,
+                self.planning_policy.supplemental_candidate_limit,
+                max(requirement.minimum - before, requirement.minimum),
+            )
+            supplemental = self._run_graph(
+                message=query,
+                session_id=f"{session_id}:coverage:{requirement.name}",
+                city=city,
+                entity_types=[requirement.query_entity_type],
+                top_k=request_top_k,
+                kb_version=kb_version,
+                conversation_context=conversation_context,
+            )
+            accepted = [
+                item
+                for item in supplemental.evidence
+                if _candidate_matches_requirement(
+                    item,
+                    requirement,
+                    city=city,
+                )
+            ]
+            evidence = _merge_candidate_evidence(evidence, accepted)
+            after = _count_eligible_candidates(
+                evidence,
+                requirement,
+                city=city,
+            )
+            requests.append(
+                {
+                    "requirement": requirement.name,
+                    "entity_type": requirement.query_entity_type,
+                    "minimum": requirement.minimum,
+                    "before": before,
+                    "accepted": len(accepted),
+                    "after": after,
+                    "status": "completed" if after >= requirement.minimum else "partial",
+                    "error": supplemental.error,
+                }
+            )
+
+        missing = [
+            requirement.name
+            for requirement in requirements
+            if _count_eligible_candidates(evidence, requirement, city=city)
+            < requirement.minimum
+        ]
+        warnings = list(graph.warnings)
+        warnings.extend(
+            f"planning_candidate_coverage_missing:{name}" for name in missing
+        )
+        updated = graph.model_copy(
+            update={
+                "evidence": evidence,
+                "warnings": list(dict.fromkeys(warnings)),
+            }
+        )
+        return updated, {
+            "node": "planning_candidate_coverage",
+            "status": "completed" if not missing else "partial",
+            "duration_days": duration_days,
+            "duration_nights": duration_nights,
+            "requests": requests,
+            "missing": missing,
+            "candidate_count": len(evidence),
+        }
+
     def _run_graph(
         self,
         *,
@@ -427,6 +568,138 @@ class TravelOrchestrator:
             "suitability": [item.suitability for item in weather],
             "elapsed_ms": int((perf_counter() - started_at) * 1000),
         }
+
+
+def _candidate_coverage_requirements(
+    *,
+    duration_days: int,
+    duration_nights: int,
+    policy: PlanningPolicy,
+) -> list[_CandidateCoverageRequirement]:
+    full_trip = (
+        duration_nights > 0
+        or duration_days >= policy.full_coverage_min_days
+    )
+    if not full_trip:
+        return []
+    requirements = [
+        _CandidateCoverageRequirement(
+            name="activity",
+            accepted_entity_types=frozenset({"attraction", "nightlife"}),
+            query_entity_type="attraction",
+            minimum=duration_days * policy.activity_candidates_per_day,
+            query_label="địa điểm tham quan",
+        ),
+        _CandidateCoverageRequirement(
+            name="meal",
+            accepted_entity_types=frozenset({"restaurant"}),
+            query_entity_type="restaurant",
+            minimum=duration_days * policy.meal_candidates_per_day,
+            query_label="nhà hàng hoặc quán ăn",
+        ),
+    ]
+    if policy.rest_break_candidates_per_trip:
+        requirements.append(
+            _CandidateCoverageRequirement(
+                name="rest_break",
+                accepted_entity_types=frozenset({"cafe"}),
+                query_entity_type="cafe",
+                minimum=policy.rest_break_candidates_per_trip,
+                query_label="quán cà phê để nghỉ ngơi",
+            )
+        )
+    if duration_nights > 0:
+        requirements.append(
+            _CandidateCoverageRequirement(
+                name="hotel",
+                accepted_entity_types=frozenset({"hotel"}),
+                query_entity_type="hotel",
+                minimum=policy.hotel_candidate_options,
+                query_label="khách sạn phù hợp để lưu trú",
+            )
+        )
+    return requirements
+
+
+def _supplemental_candidate_query(
+    requirement: _CandidateCoverageRequirement,
+    *,
+    message: str,
+    indoor_only: bool,
+) -> str:
+    label = requirement.query_label
+    if indoor_only:
+        label = f"{label} trong nhà"
+    return f"Bổ sung {label} đã xác minh cho yêu cầu: {message}"
+
+
+def _count_eligible_candidates(
+    evidence: list[dict[str, Any]],
+    requirement: _CandidateCoverageRequirement,
+    *,
+    city: str | None,
+) -> int:
+    return sum(
+        _candidate_matches_requirement(item, requirement, city=city)
+        for item in evidence
+    )
+
+
+def _candidate_matches_requirement(
+    candidate: dict[str, Any],
+    requirement: _CandidateCoverageRequirement,
+    *,
+    city: str | None,
+) -> bool:
+    if candidate.get("entity_type") not in requirement.accepted_entity_types:
+        return False
+    if not candidate.get("place_id"):
+        return False
+    return city is None or normalize_text(str(candidate.get("city") or "")) == normalize_text(
+        city
+    )
+
+
+def _merge_candidate_evidence(
+    primary: list[dict[str, Any]],
+    supplemental: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = [dict(item) for item in primary]
+    index_by_id = {
+        str(item.get("place_id") or ""): index
+        for index, item in enumerate(merged)
+        if item.get("place_id")
+    }
+    for item in supplemental:
+        place_id = str(item.get("place_id") or "")
+        if not place_id:
+            continue
+        existing_index = index_by_id.get(place_id)
+        if existing_index is None:
+            index_by_id[place_id] = len(merged)
+            merged.append(dict(item))
+            continue
+        existing = merged[existing_index]
+        existing_attributes = existing.get("attributes")
+        incoming_attributes = item.get("attributes")
+        attributes = {
+            **(
+                dict(existing_attributes)
+                if isinstance(existing_attributes, dict)
+                else {}
+            ),
+            **(
+                dict(incoming_attributes)
+                if isinstance(incoming_attributes, dict)
+                else {}
+            ),
+        }
+        merged[existing_index] = {
+            **existing,
+            **{key: value for key, value in item.items() if value is not None},
+            **({"attributes": attributes} if attributes else {}),
+        }
+    return merged
 
 
 def _is_greeting(message: str) -> bool:
