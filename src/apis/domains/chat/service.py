@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+import re
 from time import perf_counter
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -151,6 +152,14 @@ def resolve_top_k(request: ChatRequest) -> int:
     return DEFAULT_TOP_K
 
 
+def _evidence_type_counts(evidence: list[EvidenceItem]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in evidence:
+        key = str(item.entity_type or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _resolve_effective_travel_date(
     *,
     explicit_date: date | None,
@@ -166,8 +175,17 @@ def _resolve_effective_travel_date(
     assumption is persisted in plan constraints and exposed by the frontend.
     """
 
+    reference = now or datetime.now(_VIETNAM_TIMEZONE)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=_VIETNAM_TIMEZONE)
+    else:
+        reference = reference.astimezone(_VIETNAM_TIMEZONE)
+
     if explicit_date is not None:
         return explicit_date, False
+    message_date = _travel_date_from_message(message, reference.date())
+    if message_date is not None:
+        return message_date, False
     if context_date is not None:
         return context_date, False
     if active_plan is not None and active_plan.start_date is not None:
@@ -177,12 +195,36 @@ def _resolve_effective_travel_date(
         )
     if not is_itinerary_request(message, {}):
         return None, False
-    reference = now or datetime.now(_VIETNAM_TIMEZONE)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=_VIETNAM_TIMEZONE)
-    else:
-        reference = reference.astimezone(_VIETNAM_TIMEZONE)
     return reference.date() + timedelta(days=1), True
+
+
+def _travel_date_from_message(message: str, today: date) -> date | None:
+    """Parse an explicit Vietnamese numeric date without confusing trip length."""
+
+    match = re.search(
+        r"(?<!\d)([0-3]?\d)[/-]([01]?\d)(?:[/-](\d{2}|\d{4}))?(?!\d)",
+        message,
+    )
+    if match is None:
+        return None
+    day_value = int(match.group(1))
+    month_value = int(match.group(2))
+    year_text = match.group(3)
+    year_value = (
+        2000 + int(year_text)
+        if year_text is not None and len(year_text) == 2
+        else int(year_text or today.year)
+    )
+    try:
+        parsed = date(year_value, month_value, day_value)
+    except ValueError:
+        return None
+    if year_text is None and parsed < today:
+        try:
+            parsed = parsed.replace(year=parsed.year + 1)
+        except ValueError:
+            return None
+    return parsed
 
 
 def handle_chat(
@@ -338,14 +380,14 @@ def handle_chat(
     )
     if local_plan_response is not None:
         return local_plan_response
-    logger.info(
-        "Chat turn start session_id={} city={} entity_types={} top_k={} message_len={}",
-        request.session_id,
-        context.city or "-",
-        request.entity_types or [],
-        top_k,
-        len(request.message),
-    )
+    logger.bind(
+        event="chat.turn.started",
+        city_resolved=context.city is not None,
+        entity_type_count=len(request.entity_types or []),
+        top_k=top_k,
+        message_length=len(request.message),
+        conversation_route=resolved_turn.resolution.route,
+    ).info("chat.turn.started")
     if resolved_turn.resolution.route == "conversation":
         answer = str(resolved_turn.resolution.direct_answer or "").strip()
         trace = [context.trace_event(), resolved_turn.trace_event()]
@@ -395,6 +437,16 @@ def handle_chat(
         active_plan=active_plan,
         message=graph_message,
     )
+    logger.bind(
+        event="itinerary.context.resolved",
+        itinerary_requested=is_itinerary_request(graph_message, {}),
+        city_resolved=effective_city is not None,
+        travel_date=effective_travel_date.isoformat()
+        if effective_travel_date
+        else None,
+        travel_date_assumed=travel_date_assumed,
+        active_plan_present=active_plan is not None,
+    ).info("itinerary.context.resolved")
     orchestration = TravelOrchestrator(
         kb_client,
         weather_client,
@@ -764,6 +816,14 @@ def handle_chat(
             "rooms": response_active_plan.constraints.get("rooms", 1),
         }
     if planning_unavailable:
+        logger.bind(
+            event="itinerary.response.guard",
+            planning_status=orchestration.planning_trace.get("status"),
+            reason_code=orchestration.planning_trace.get("reason"),
+            failure_reason=orchestration.planning_trace.get("failure_reason"),
+            evidence_count=len(agent_result.evidence),
+            itinerary_days=len(agent_result.itinerary),
+        ).warning("itinerary.response.guard")
         synthesis = SynthesisResult(
             answer=_planning_unavailable_answer(response_active_plan),
             unresolved_tools=[],
@@ -819,14 +879,18 @@ def handle_chat(
                 else None,
             }
         )
-    logger.info(
-        "Chat turn end session_id={} evidence_count={} result_ids={} answer_len={} elapsed_ms={}",
-        request.session_id,
-        len(evidence),
-        [item.place_id for item in evidence],
-        len(answer),
-        int((perf_counter() - started_at) * 1000),
-    )
+    logger.bind(
+        event="chat.turn.completed",
+        evidence_count=len(evidence),
+        evidence_type_counts=_evidence_type_counts(evidence),
+        itinerary_days=len(agent_result.itinerary),
+        itinerary_slots=sum(
+            len(day_item.get("slots", [])) for day_item in agent_result.itinerary
+        ),
+        planning_status=orchestration.planning_trace.get("status"),
+        answer_length=len(answer),
+        elapsed_ms=int((perf_counter() - started_at) * 1000),
+    ).info("chat.turn.completed")
     resolved_context = _resolved_context(context.to_dict(), resolved_turn)
     response = ChatResponse(
         session_id=request.session_id,

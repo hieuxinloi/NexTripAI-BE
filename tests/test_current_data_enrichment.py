@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 from src.core_ai.nextrip_agent.current_data import enrich_current_data
 from src.core_ai.nextrip_agent.schemas import AgentResult
+from src.shared.request_context import current_request_id, reset_request_id, set_request_id
 
 
 class FakeCurrentData:
@@ -101,6 +102,16 @@ class FakeCurrentData:
         }
 
 
+class ContextCapturingCurrentData(FakeCurrentData):
+    def __init__(self) -> None:
+        super().__init__()
+        self.route_request_ids: list[str] = []
+
+    def recommend_transport(self, **kwargs):
+        self.route_request_ids.append(current_request_id())
+        return super().recommend_transport(**kwargs)
+
+
 def _graph() -> AgentResult:
     return AgentResult(
         answer="",
@@ -178,6 +189,38 @@ def test_enrichment_preserves_contract_and_attaches_current_context() -> None:
     assert first_slot["transport_to_next"]["provider"] == "here"
     assert result.required_tools == []
     assert trace["status"] == "completed"
+
+
+def test_enrichment_prefers_explicit_duration_nights_for_hotel_lookup() -> None:
+    graph = _graph().model_copy(
+        update={"query_plan": {"duration_days": 4, "duration_nights": 1}}
+    )
+    client = FakeCurrentData()
+
+    enrich_current_data(
+        graph,
+        client,
+        travel_date=date(2026, 8, 31),
+        include_traffic=False,
+    )
+
+    assert client.hotel_request is not None
+    assert client.hotel_request["stay_nights"] == 1
+
+
+def test_enrichment_propagates_request_context_to_route_threads() -> None:
+    client = ContextCapturingCurrentData()
+    token = set_request_id("request-context-traffic")
+    try:
+        enrich_current_data(
+            _graph(),
+            client,
+            travel_date=date(2026, 8, 31),
+        )
+    finally:
+        reset_request_id(token)
+
+    assert client.route_request_ids == ["request-context-traffic"]
 
 
 class NoRepeatedLookupCurrentData:

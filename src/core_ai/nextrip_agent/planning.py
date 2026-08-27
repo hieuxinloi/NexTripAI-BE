@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from datetime import date, datetime, timedelta
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -251,6 +253,7 @@ def planning_agent_node(
     if not is_itinerary_request(message, graph.query_plan):
         return graph, {"node": "planning", "status": "skipped"}
 
+    planning_started_at = perf_counter()
     duration_days = requested_itinerary_duration_days(message, graph.query_plan)
     duration_nights = requested_itinerary_duration_nights(
         message,
@@ -258,6 +261,13 @@ def planning_agent_node(
         graph.query_plan,
     )
     resolved_city = city or _single_candidate_city(graph.evidence)
+    logger.bind(
+        event="itinerary.planning.started",
+        duration_days=duration_days,
+        duration_nights=duration_nights,
+        travel_date=travel_date.isoformat() if travel_date else None,
+        evidence_count=len(graph.evidence),
+    ).info("itinerary.planning.started")
     if resolved_city is None:
         missing = list(dict.fromkeys([*graph.missing_fields, "city"]))
         return graph.model_copy(update={"missing_fields": missing}), {
@@ -304,6 +314,14 @@ def planning_agent_node(
     )
     if remote_candidate_count:
         planning_warnings.append(f"remote_candidates_excluded:{remote_candidate_count}")
+    logger.bind(
+        event="itinerary.candidates.filtered",
+        city_candidate_count=len(candidates),
+        planner_candidate_count=len(planner_candidates),
+        remote_excluded_count=remote_candidate_count,
+        candidate_type_counts=_candidate_type_counts(planner_candidates),
+        hotel_state_counts=_hotel_state_counts(planner_candidates),
+    ).info("itinerary.candidates.filtered")
     safe_activity_count = sum(
         item.get("entity_type") in {"attraction", "nightlife"}
         for item in planner_candidates
@@ -330,6 +348,13 @@ def planning_agent_node(
             "candidate_count": len(candidates),
         }
     if planner is not None:
+        semantic_started_at = perf_counter()
+        logger.bind(
+            event="itinerary.semantic.started",
+            candidate_count=len(planner_candidates),
+            duration_days=duration_days,
+            duration_nights=duration_nights,
+        ).info("itinerary.semantic.started")
         try:
             semantic_method = getattr(planner, "plan_semantic_itinerary", None)
             planning_arguments = {
@@ -369,16 +394,28 @@ def planning_agent_node(
                 policy=policy,
             )
             plan = proposed
+            logger.bind(
+                event="itinerary.semantic.completed",
+                planner=source,
+                itinerary_days=len(proposed.days),
+                elapsed_ms=round((perf_counter() - semantic_started_at) * 1000, 1),
+            ).info("itinerary.semantic.completed")
         except Exception as exc:
             planning_warnings.append(f"planning_fallback:{exc.__class__.__name__}")
-            logger.warning(
-                "Planning agent fallback city={} error_type={} reason={}",
-                resolved_city,
-                exc.__class__.__name__,
-                str(exc),
-            )
+            logger.bind(
+                event="itinerary.semantic.failed",
+                error_type=exc.__class__.__name__,
+                reason_code=_planning_error_reason(exc),
+                elapsed_ms=round((perf_counter() - semantic_started_at) * 1000, 1),
+            ).warning("itinerary.semantic.failed")
 
     if plan is None:
+        fallback_started_at = perf_counter()
+        logger.bind(
+            event="itinerary.fallback.started",
+            candidate_count=len(planner_candidates),
+            hotel_state_counts=_hotel_state_counts(planner_candidates),
+        ).info("itinerary.fallback.started")
         try:
             plan = _fallback_plan(
                 planner_candidates,
@@ -402,16 +439,22 @@ def planning_agent_node(
                 travel_date=travel_date,
                 policy=policy,
             )
+            logger.bind(
+                event="itinerary.fallback.completed",
+                itinerary_days=len(plan.days),
+                elapsed_ms=round((perf_counter() - fallback_started_at) * 1000, 1),
+            ).info("itinerary.fallback.completed")
         except Exception as exc:
             planning_warnings.append(
                 f"planning_fallback_unavailable:{exc.__class__.__name__}"
             )
-            logger.warning(
-                "Planning fallback unavailable city={} error_type={} reason={}",
-                resolved_city,
-                exc.__class__.__name__,
-                str(exc),
-            )
+            failure_reason = _planning_error_reason(exc)
+            logger.bind(
+                event="itinerary.fallback.failed",
+                error_type=exc.__class__.__name__,
+                reason_code=failure_reason,
+                elapsed_ms=round((perf_counter() - fallback_started_at) * 1000, 1),
+            ).warning("itinerary.fallback.failed")
             updated = graph.model_copy(
                 update={
                     "warnings": list(
@@ -427,6 +470,11 @@ def planning_agent_node(
                 "city": resolved_city,
                 "duration_days": duration_days,
                 "candidate_count": len(candidates),
+                "failure_reason": failure_reason,
+                "elapsed_ms": round(
+                    (perf_counter() - planning_started_at) * 1000,
+                    1,
+                ),
             }
 
     itinerary = _materialize(plan, candidates)
@@ -443,6 +491,14 @@ def planning_agent_node(
             ],
         }
     )
+    logger.bind(
+        event="itinerary.planning.completed",
+        planner=source,
+        itinerary_days=len(itinerary),
+        slot_count=sum(len(day.get("slots", [])) for day in itinerary),
+        warning_count=len(updated.warnings),
+        elapsed_ms=round((perf_counter() - planning_started_at) * 1000, 1),
+    ).info("itinerary.planning.completed")
     return updated, {
         "node": "planning",
         "status": "completed",
@@ -1338,16 +1394,73 @@ def _resolve_stay_hotel(
 
 
 def _hotel_candidate_is_selectable(candidate: dict[str, Any]) -> bool:
+    return _hotel_candidate_availability_state(candidate) != "unavailable"
+
+
+def _hotel_candidate_availability_state(candidate: dict[str, Any]) -> str:
+    """Classify operational evidence without treating missing data as sold out."""
+
     availability = (candidate.get("attributes") or {}).get("hotel_availability")
     if not isinstance(availability, dict):
-        return True
+        return "unknown"
     windows = availability.get("windows")
-    # Explicit operational evidence takes precedence over semantic ranking.
-    # Missing evidence remains eligible so the planner can still degrade
-    # gracefully when Current Data is temporarily unavailable.
-    if isinstance(windows, list) and windows:
-        return isinstance(availability.get("selected_window_index"), int)
-    return True
+    if not isinstance(windows, list) or not windows:
+        return "unknown"
+
+    selected_index = availability.get("selected_window_index")
+    if (
+        isinstance(selected_index, int)
+        and not isinstance(selected_index, bool)
+        and 0 <= selected_index < len(windows)
+        and isinstance(windows[selected_index], dict)
+    ):
+        selected_status = str(
+            windows[selected_index].get("availability") or "unknown"
+        ).strip().lower()
+        if selected_status not in {"unavailable", "sold_out"}:
+            return "available" if selected_status == "available" else "unknown"
+
+    statuses = {
+        str(window.get("availability") or "unknown").strip().lower()
+        for window in windows
+        if isinstance(window, dict)
+    }
+    # Reject only when every usable window explicitly says that inventory is
+    # unavailable. Missing, stale and failed lookups remain eligible; once a
+    # hotel is selected the post-planning Current Data pass refreshes that one
+    # hotel with the exact stay context.
+    if statuses and statuses.issubset({"unavailable", "sold_out"}):
+        return "unavailable"
+    if "available" in statuses:
+        return "available"
+    return "unknown"
+
+
+def _candidate_type_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(str(item.get("entity_type") or "unknown") for item in candidates).items()
+        )
+    )
+
+
+def _hotel_state_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                _hotel_candidate_availability_state(item)
+                for item in candidates
+                if item.get("entity_type") == "hotel"
+            ).items()
+        )
+    )
+
+
+def _planning_error_reason(exc: Exception) -> str:
+    value = str(exc).strip()
+    if isinstance(exc, ValueError) and re.fullmatch(r"[a-z0-9_.:-]{1,120}", value):
+        return value
+    return exc.__class__.__name__
 
 
 def _period_window(

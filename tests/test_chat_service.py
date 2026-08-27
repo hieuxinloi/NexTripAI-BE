@@ -70,6 +70,32 @@ def test_explicit_travel_date_is_never_marked_as_assumed() -> None:
     assert assumed is False
 
 
+def test_numeric_date_in_message_is_used_as_explicit_travel_date() -> None:
+    resolved, assumed = _resolve_effective_travel_date(
+        explicit_date=None,
+        context_date=None,
+        active_plan=None,
+        message="Len lich trinh 3 ngay o Quy Nhon bat dau tu ngay 28/8",
+        now=datetime(2026, 8, 27, 17, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+    )
+
+    assert resolved == date(2026, 8, 28)
+    assert assumed is False
+
+
+def test_numeric_date_without_year_rolls_forward_after_date_has_passed() -> None:
+    resolved, assumed = _resolve_effective_travel_date(
+        explicit_date=None,
+        context_date=None,
+        active_plan=None,
+        message="Len lich trinh ngay 28/8",
+        now=datetime(2026, 8, 29, 8, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+    )
+
+    assert resolved == date(2027, 8, 28)
+    assert assumed is False
+
+
 class FakeKbClient:
     def __init__(self) -> None:
         self.last_top_k: int | None = None

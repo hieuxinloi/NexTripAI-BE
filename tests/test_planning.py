@@ -732,6 +732,45 @@ def test_overnight_fallback_rejects_only_unavailable_hotels() -> None:
     assert result.itinerary == []
 
 
+def test_overnight_fallback_keeps_hotel_with_unknown_availability() -> None:
+    candidates = _candidates()
+    hotel = next(item for item in candidates if item["entity_type"] == "hotel")
+    hotel["attributes"]["hotel_availability"] = {
+        "selected_window_index": None,
+        "windows": [
+            {
+                "lookup_status": "missing",
+                "availability": "unknown",
+                "offers": [],
+            }
+        ],
+    }
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 3},
+    )
+
+    result, trace = planning_agent_node(
+        message="Len lich trinh Quy Nhon 3 ngay 2 dem",
+        graph=graph,
+        weather_forecast=[],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    hotel_roles = [
+        slot["role"]
+        for day in result.itinerary
+        for slot in day["slots"]
+        if slot["entity_type"] == "hotel"
+    ]
+    assert trace["status"] == "completed"
+    assert hotel_roles == ["check_in", "check_out"]
+
+
 def test_planning_fallback_skips_a_restaurant_closed_during_lunch() -> None:
     candidates = [
         _candidate("attr_1", "attraction", indoor=True),

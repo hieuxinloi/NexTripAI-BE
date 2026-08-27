@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import date, datetime, time, timedelta
 import math
+from time import perf_counter
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
+
+from loguru import logger
 
 from src.core_ai.nextrip_agent.schemas import AgentResult
 
@@ -61,7 +65,29 @@ def enrich_current_data(
     every remote failure preserves the original graph result.
     """
 
+    enrichment_started_at = perf_counter()
+    logger.bind(
+        event="itinerary.current_data.started",
+        client_configured=client is not None,
+        travel_date_present=travel_date is not None,
+        include_traffic=include_traffic,
+        force_hotel_refresh=force_hotel_refresh,
+        evidence_count=len(graph.evidence),
+        itinerary_days=len(graph.itinerary),
+        itinerary_slots=_itinerary_slot_count(graph.itinerary),
+    ).info("Itinerary Current Data enrichment started")
+
     if client is None:
+        elapsed_ms = _elapsed_ms(enrichment_started_at)
+        logger.bind(
+            event="itinerary.current_data.completed",
+            status="disabled",
+            include_traffic=include_traffic,
+            evidence_count=len(graph.evidence),
+            itinerary_days=len(graph.itinerary),
+            itinerary_slots=_itinerary_slot_count(graph.itinerary),
+            elapsed_ms=elapsed_ms,
+        ).info("Itinerary Current Data enrichment completed")
         if not force_hotel_refresh:
             return graph, {"node": "current_data", "status": "disabled"}
         return (
@@ -102,6 +128,8 @@ def enrich_current_data(
         for place_id in place_ids
         if not _evidence_has_current(evidence, place_id)
     ]
+    places_started_at = perf_counter()
+    places_error_type: str | None = None
     if missing_current_ids:
         try:
             current_by_id = _current_places_by_id(client.places(missing_current_ids))
@@ -115,10 +143,26 @@ def enrich_current_data(
             ]
             completed.append("places")
         except Exception as exc:
+            places_error_type = exc.__class__.__name__
             failures.append(f"places:{exc.__class__.__name__}")
     elif place_ids:
         completed.append("places")
+    logger.bind(
+        event="itinerary.current_data.places",
+        status=(
+            "failed"
+            if places_error_type
+            else ("completed" if place_ids else "skipped")
+        ),
+        requested_count=len(place_ids),
+        lookup_count=len(missing_current_ids),
+        resolved_count=len(current_by_id),
+        missing_count=max(0, len(missing_current_ids) - len(current_by_id)),
+        error_type=places_error_type,
+        elapsed_ms=_elapsed_ms(places_started_at),
+    ).info("Itinerary Current Data places completed")
 
+    hotels_started_at = perf_counter()
     hotel_ids = _hotel_ids(evidence, itinerary)
     hotel_by_id = _existing_hotel_availability(evidence)
     missing_hotel_ids = [
@@ -133,6 +177,7 @@ def enrich_current_data(
     lookup_hotel_ids = list(
         dict.fromkeys([*missing_hotel_ids, *unpriced_selected_hotel_ids])
     )
+    hotel_error_type: str | None = None
     if lookup_hotel_ids and travel_date is not None:
         try:
             response = client.hotel_availability(
@@ -182,10 +227,31 @@ def enrich_current_data(
             itinerary = _merge_hotel_slots(itinerary, hotel_by_id)
             completed.append("hotel_availability")
         except Exception as exc:
+            hotel_error_type = exc.__class__.__name__
             failures.append(f"hotel_availability:{exc.__class__.__name__}")
     elif hotel_ids and travel_date is not None:
         itinerary = _merge_hotel_slots(itinerary, hotel_by_id)
         completed.append("hotel_availability")
+    hotel_states = _hotel_availability_counts(hotel_by_id)
+    logger.bind(
+        event="itinerary.current_data.hotels",
+        status=(
+            "failed"
+            if hotel_error_type
+            else ("completed" if hotel_ids and travel_date is not None else "skipped")
+        ),
+        requested_count=len(hotel_ids),
+        lookup_count=len(lookup_hotel_ids),
+        resolved_count=len(hotel_by_id),
+        selected_hotel_count=len(selected_hotel_ids),
+        available_count=hotel_states["available"],
+        unavailable_count=hotel_states["unavailable"],
+        unknown_count=hotel_states["unknown"],
+        priced_count=hotel_states["priced"],
+        stay_nights=_stay_nights(graph.query_plan),
+        error_type=hotel_error_type,
+        elapsed_ms=_elapsed_ms(hotels_started_at),
+    ).info("Itinerary Current Data hotels completed")
 
     route_count = 0
     route_failures = 0
@@ -252,7 +318,8 @@ def enrich_current_data(
             "warnings": warnings,
         }
     )
-    return updated, {
+    elapsed_ms = _elapsed_ms(enrichment_started_at)
+    trace = {
         "node": "current_data",
         "status": status,
         "completed": completed,
@@ -262,6 +329,23 @@ def enrich_current_data(
         "route_count": route_count,
         "traffic_enabled": include_traffic,
     }
+    logger.bind(
+        event="itinerary.current_data.completed",
+        status=status,
+        completed_steps=completed,
+        failure_count=len(failures),
+        failure_codes=_safe_failure_codes(failures),
+        place_count=len(current_by_id),
+        hotel_count=len(hotel_by_id),
+        route_count=route_count,
+        route_failure_count=route_failures,
+        evidence_count=len(evidence),
+        itinerary_days=len(itinerary),
+        itinerary_slots=_itinerary_slot_count(itinerary),
+        include_traffic=include_traffic,
+        elapsed_ms=elapsed_ms,
+    ).info("Itinerary Current Data enrichment completed")
+    return updated, trace
 
 
 def _evidence_has_current(evidence: list[dict[str, Any]], place_id: str) -> bool:
@@ -320,6 +404,34 @@ def _canonical_place_ids(values: list[Any]) -> list[str]:
         if place_id not in result:
             result.append(place_id)
     return result
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((perf_counter() - started_at) * 1000))
+
+
+def _itinerary_slot_count(itinerary: list[dict[str, Any]]) -> int:
+    return sum(
+        len(day.get("slots", []))
+        for day in itinerary
+        if isinstance(day, dict) and isinstance(day.get("slots"), list)
+    )
+
+
+def _safe_failure_codes(failures: list[str]) -> list[str]:
+    codes: list[str] = []
+    for failure in failures:
+        parts = failure.split(":")
+        if not parts:
+            continue
+        stage = parts[0]
+        error_type = parts[-1] if len(parts) > 1 else "unknown"
+        candidate = f"{stage}:{error_type}".lower()
+        if all(character.isalnum() or character in "._:-" for character in candidate):
+            codes.append(candidate[:96])
+        else:
+            codes.append(f"{stage}:unclassified")
+    return list(dict.fromkeys(codes))
 
 
 def _current_places_by_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -528,7 +640,42 @@ def _hotel_result_has_price(result: object) -> bool:
     )
 
 
+def _hotel_availability_counts(
+    hotel_by_id: Mapping[str, dict[str, Any]],
+) -> dict[str, int]:
+    counts = {"available": 0, "unavailable": 0, "unknown": 0, "priced": 0}
+    for result in hotel_by_id.values():
+        if _hotel_result_has_price(result):
+            counts["priced"] += 1
+        windows = result.get("windows")
+        selected_index = result.get("selected_window_index")
+        selected: Mapping[str, Any] | None = None
+        if (
+            isinstance(windows, list)
+            and isinstance(selected_index, int)
+            and 0 <= selected_index < len(windows)
+            and isinstance(windows[selected_index], Mapping)
+        ):
+            selected = windows[selected_index]
+        availability = str(
+            (selected or {}).get("availability")
+            or result.get("availability")
+            or result.get("status")
+            or "unknown"
+        ).lower()
+        if availability == "available":
+            counts["available"] += 1
+        elif availability == "unavailable":
+            counts["unavailable"] += 1
+        else:
+            counts["unknown"] += 1
+    return counts
+
+
 def _stay_nights(query_plan: Mapping[str, Any]) -> int:
+    duration_nights = query_plan.get("duration_nights")
+    if isinstance(duration_nights, int) and not isinstance(duration_nights, bool):
+        return max(1, min(duration_nights, 30))
     duration = query_plan.get("duration_days")
     if isinstance(duration, int) and not isinstance(duration, bool):
         return max(1, min(duration - 1, 30))
@@ -574,6 +721,7 @@ def _attach_transport(
     client: SupportsCurrentData,
     start_date: date,
 ) -> tuple[list[dict[str, Any]], int, int]:
+    routing_started_at = perf_counter()
     jobs: list[tuple[dict[str, Any], str, str, datetime]] = []
     reused = 0
     for day_item in itinerary:
@@ -598,24 +746,40 @@ def _attach_transport(
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(jobs)))) as executor:
         future_jobs = {
             executor.submit(
+                copy_context().run,
                 client.recommend_transport,
                 origin_id=origin_id,
                 destination_id=destination_id,
                 departure_time=departure,
-            ): (slot, origin_id, destination_id, departure)
+            ): (slot, origin_id, destination_id, departure, perf_counter())
             for slot, origin_id, destination_id, departure in jobs
         }
         for future in as_completed(future_jobs):
-            slot, origin_id, destination_id, departure = future_jobs[future]
+            slot, origin_id, destination_id, departure, leg_started_at = future_jobs[
+                future
+            ]
             try:
                 payload = future.result()
-                slot["transport_to_next"] = _transport_summary(
+                summary = _transport_summary(
                     payload,
                     origin_id=origin_id,
                     destination_id=destination_id,
                     departure=departure,
                 )
+                slot["transport_to_next"] = summary
                 completed += 1
+                logger.bind(
+                    event="itinerary.traffic.route_leg",
+                    status="completed",
+                    origin_place_id=origin_id,
+                    destination_place_id=destination_id,
+                    provider=str(summary.get("provider") or "-"),
+                    recommended_mode=str(summary.get("recommended_mode") or "-"),
+                    distance_meters=summary.get("distance_meters"),
+                    duration_seconds=summary.get("duration_seconds"),
+                    degraded=bool(summary.get("degraded")),
+                    elapsed_ms=_elapsed_ms(leg_started_at),
+                ).debug("Itinerary traffic route leg completed")
             except Exception as exc:
                 slot["transport_to_next"] = {
                     "status": "unavailable",
@@ -625,6 +789,23 @@ def _attach_transport(
                     "error_code": exc.__class__.__name__,
                 }
                 failed += 1
+                logger.bind(
+                    event="itinerary.traffic.route_leg",
+                    status="failed",
+                    origin_place_id=origin_id,
+                    destination_place_id=destination_id,
+                    error_type=exc.__class__.__name__,
+                    elapsed_ms=_elapsed_ms(leg_started_at),
+                ).debug("Itinerary traffic route leg failed")
+    logger.bind(
+        event="itinerary.traffic.completed",
+        requested_count=len(jobs),
+        reused_count=reused,
+        succeeded_count=max(0, completed - reused),
+        total_usable_count=completed,
+        failed_count=failed,
+        elapsed_ms=_elapsed_ms(routing_started_at),
+    ).info("Itinerary traffic enrichment completed")
     return itinerary, completed, failed
 
 

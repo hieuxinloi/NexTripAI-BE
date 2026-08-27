@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from time import perf_counter
 from typing import Any
+
+from loguru import logger
 
 from src.core_ai.nextrip_agent.constants import KbVersion
 from src.core_ai.nextrip_agent.current_data import (
@@ -211,6 +214,7 @@ class TravelOrchestrator:
         longitude: float | None,
         conversation_context: dict[str, Any] | None = None,
     ) -> OrchestratedResult:
+        orchestration_started_at = perf_counter()
         plan = build_orchestration_plan(
             message=message,
             travel_date=travel_date,
@@ -225,10 +229,23 @@ class TravelOrchestrator:
         weather_forecast: list[WeatherAssessment] = []
         weather_trace: dict[str, Any] = {"node": "weather", "status": "skipped"}
         planning_trace: dict[str, Any] = {"node": "planning", "status": "skipped"}
+        logger.bind(
+            event="itinerary.orchestration.planned",
+            mode=plan.mode.value,
+            run_graph=plan.run_graph,
+            run_weather=plan.run_weather,
+            run_planning=plan.run_planning,
+            city=effective_city or "-",
+            kb_version=str(kb_version),
+            graph_top_k=graph_top_k,
+        ).info("Itinerary orchestration planned")
 
+        primary_tools_started_at = perf_counter()
         if plan.run_graph and plan.run_weather:
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="nextrip-tools") as pool:
+                graph_context = copy_context()
                 graph_future = pool.submit(
+                    graph_context.run,
                     self._run_graph,
                     message=message,
                     session_id=session_id,
@@ -238,7 +255,9 @@ class TravelOrchestrator:
                     kb_version=kb_version,
                     conversation_context=conversation_context,
                 )
+                weather_context = copy_context()
                 weather_future = pool.submit(
+                    weather_context.run,
                     self._run_weather_forecast,
                     message=message,
                     city=effective_city,
@@ -288,6 +307,17 @@ class TravelOrchestrator:
                 answer=GREETING_ANSWER,
                 answer_type="conversation",
             )
+
+        logger.bind(
+            event="itinerary.primary_tools.completed",
+            graph_status="unavailable" if graph.error else "completed",
+            graph_error_code=_agent_error_code(graph),
+            evidence_count=len(graph.evidence),
+            evidence_by_entity=_entity_type_counts(graph.evidence),
+            weather_status=str(weather_trace.get("status") or "skipped"),
+            weather_days=len(weather_forecast),
+            elapsed_ms=_elapsed_ms(primary_tools_started_at),
+        ).info("Itinerary primary tools completed")
 
         if (
             plan.run_graph
@@ -357,6 +387,12 @@ class TravelOrchestrator:
                 self.current_data_client,
                 travel_date=travel_date,
                 include_traffic=False,
+                # Availability embedded in KB is a historical observation and
+                # may describe another check-in window. Query Current Data for
+                # this request's exact stay before applying hotel invariants.
+                force_hotel_refresh=(
+                    self.current_data_client is not None and travel_date is not None
+                ),
             )
             trace.append(
                 {
@@ -364,6 +400,7 @@ class TravelOrchestrator:
                     "node": "current_data_preplanning",
                 }
             )
+            planning_started_at = perf_counter()
             graph, planning_trace = planning_agent_node(
                 message=message,
                 graph=graph,
@@ -382,6 +419,34 @@ class TravelOrchestrator:
                 travel_date=travel_date,
                 policy=self.planning_policy,
             )
+            planning_log = logger.bind(
+                event="itinerary.planning.completed",
+                status=str(planning_trace.get("status") or "unknown"),
+                reason_code=_safe_reason_code(planning_trace.get("reason")),
+                planner=str(planning_trace.get("planner") or "-"),
+                duration_days=duration_days,
+                duration_nights=duration_nights,
+                candidate_count=int(planning_trace.get("candidate_count") or 0),
+                itinerary_days=len(graph.itinerary),
+                itinerary_slots=_itinerary_slot_count(graph.itinerary),
+                warning_count=len(graph.warnings),
+                elapsed_ms=_elapsed_ms(planning_started_at),
+            )
+            if planning_trace.get("status") == "completed":
+                planning_log.info("Itinerary planning completed")
+            else:
+                planning_log.warning("Itinerary planning unavailable")
+
+        logger.bind(
+            event="itinerary.orchestration.completed",
+            mode=plan.mode.value,
+            planning_status=str(planning_trace.get("status") or "skipped"),
+            planning_reason=_safe_reason_code(planning_trace.get("reason")),
+            evidence_count=len(graph.evidence),
+            itinerary_days=len(graph.itinerary),
+            itinerary_slots=_itinerary_slot_count(graph.itinerary),
+            elapsed_ms=_elapsed_ms(orchestration_started_at),
+        ).info("Itinerary orchestration completed")
 
         return OrchestratedResult(
             plan=plan,
@@ -407,6 +472,7 @@ class TravelOrchestrator:
         duration_days: int,
         duration_nights: int,
     ) -> tuple[AgentResult, dict[str, Any]]:
+        coverage_started_at = perf_counter()
         requirements = _candidate_coverage_requirements(
             duration_days=duration_days,
             duration_nights=duration_nights,
@@ -414,12 +480,22 @@ class TravelOrchestrator:
             weather_forecast=weather_forecast,
         )
         if not requirements or graph.error:
-            return graph, {
+            coverage_elapsed_ms = _elapsed_ms(coverage_started_at)
+            result = {
                 "node": "planning_candidate_coverage",
                 "status": "skipped" if not requirements else "unavailable",
                 "duration_days": duration_days,
                 "duration_nights": duration_nights,
             }
+            logger.bind(
+                event="itinerary.coverage.completed",
+                status=result["status"],
+                requirement_count=len(requirements),
+                candidate_count=len(graph.evidence),
+                graph_error_code=_agent_error_code(graph),
+                elapsed_ms=coverage_elapsed_ms,
+            ).info("Itinerary candidate coverage completed")
+            return graph, result
 
         evidence = list(graph.evidence)
         requests: list[dict[str, Any]] = []
@@ -446,13 +522,17 @@ class TravelOrchestrator:
             pending.append((requirement, before, query, request_top_k))
 
         supplemental_results: list[AgentResult] = []
+        supplemental_elapsed_ms: list[int] = []
         if pending:
             with ThreadPoolExecutor(
                 max_workers=min(4, len(pending)),
                 thread_name_prefix="nextrip-coverage",
             ) as pool:
-                futures = [
-                    pool.submit(
+                futures = []
+                for requirement, _, query, request_top_k in pending:
+                    request_started_at = perf_counter()
+                    future = pool.submit(
+                        copy_context().run,
                         self._run_graph,
                         message=query,
                         session_id=f"{session_id}:coverage:{requirement.name}",
@@ -462,15 +542,38 @@ class TravelOrchestrator:
                         kb_version=kb_version,
                         conversation_context=conversation_context,
                     )
-                    for requirement, _, query, request_top_k in pending
-                ]
+                    futures.append((future, request_started_at))
                 # Consume results in requirement order so evidence and trace
                 # remain deterministic even though the I/O is concurrent.
-                supplemental_results = [future.result() for future in futures]
+                for (requirement, before, _, request_top_k), (
+                    future,
+                    request_started_at,
+                ) in zip(
+                    pending,
+                    futures,
+                    strict=True,
+                ):
+                    try:
+                        supplemental_results.append(future.result())
+                    except Exception as exc:
+                        logger.bind(
+                            event="itinerary.coverage.requirement",
+                            requirement=requirement.name,
+                            entity_type=requirement.query_entity_type,
+                            minimum=requirement.minimum,
+                            before=before,
+                            request_top_k=request_top_k,
+                            status="failed",
+                            error_type=exc.__class__.__name__,
+                            elapsed_ms=_elapsed_ms(request_started_at),
+                        ).warning("Itinerary candidate coverage request failed")
+                        raise
+                    supplemental_elapsed_ms.append(_elapsed_ms(request_started_at))
 
-        for (requirement, before, _, _), supplemental in zip(
+        for (requirement, before, _, request_top_k), supplemental, request_elapsed_ms in zip(
             pending,
             supplemental_results,
+            supplemental_elapsed_ms,
             strict=True,
         ):
             accepted = [
@@ -500,6 +603,20 @@ class TravelOrchestrator:
                     "error": supplemental.error,
                 }
             )
+            logger.bind(
+                event="itinerary.coverage.requirement",
+                requirement=requirement.name,
+                entity_type=requirement.query_entity_type,
+                minimum=requirement.minimum,
+                before=before,
+                request_top_k=request_top_k,
+                returned=len(supplemental.evidence),
+                accepted=len(accepted),
+                after=after,
+                status="completed" if after >= requirement.minimum else "partial",
+                error_code=_agent_error_code(supplemental),
+                elapsed_ms=request_elapsed_ms,
+            ).info("Itinerary candidate coverage requirement completed")
 
         missing = [
             requirement.name
@@ -517,7 +634,8 @@ class TravelOrchestrator:
                 "warnings": list(dict.fromkeys(warnings)),
             }
         )
-        return updated, {
+        coverage_elapsed_ms = _elapsed_ms(coverage_started_at)
+        result = {
             "node": "planning_candidate_coverage",
             "status": "completed" if not missing else "partial",
             "duration_days": duration_days,
@@ -526,6 +644,17 @@ class TravelOrchestrator:
             "missing": missing,
             "candidate_count": len(evidence),
         }
+        logger.bind(
+            event="itinerary.coverage.completed",
+            status=result["status"],
+            requirement_count=len(requirements),
+            supplemental_request_count=len(requests),
+            missing_requirements=missing,
+            candidate_count=len(evidence),
+            evidence_by_entity=_entity_type_counts(evidence),
+            elapsed_ms=coverage_elapsed_ms,
+        ).info("Itinerary candidate coverage completed")
+        return updated, result
 
     def _run_graph(
         self,
@@ -608,6 +737,44 @@ class TravelOrchestrator:
             "suitability": [item.suitability for item in weather],
             "elapsed_ms": int((perf_counter() - started_at) * 1000),
         }
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((perf_counter() - started_at) * 1000))
+
+
+def _entity_type_counts(evidence: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in evidence:
+        entity_type = str(item.get("entity_type") or "unknown")
+        counts[entity_type] = counts.get(entity_type, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _agent_error_code(graph: AgentResult) -> str | None:
+    if not isinstance(graph.error, dict):
+        return None
+    code = graph.error.get("code")
+    return _safe_reason_code(code)
+
+
+def _safe_reason_code(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    if not candidate or len(candidate) > 96:
+        return "unclassified"
+    if not all(character.isalnum() or character in "._:-" for character in candidate):
+        return "unclassified"
+    return candidate
+
+
+def _itinerary_slot_count(itinerary: list[dict[str, Any]]) -> int:
+    return sum(
+        len(day.get("slots", []))
+        for day in itinerary
+        if isinstance(day, dict) and isinstance(day.get("slots"), list)
+    )
 
 
 def _candidate_coverage_requirements(

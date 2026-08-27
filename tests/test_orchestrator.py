@@ -17,6 +17,7 @@ from src.core_ai.nextrip_agent.synthesizer import (
 )
 from src.core_ai.nextrip_agent.weather import WeatherAssessment
 from src.infra.weather import DailyForecast
+from src.shared.request_context import current_request_id, reset_request_id, set_request_id
 
 
 class FakeKbClient:
@@ -117,11 +118,13 @@ class ParallelCandidateCoverageKbClient(CandidateCoverageKbClient):
         self._call_number = 0
         self._supplement_barrier = Barrier(3, timeout=2)
         self.supplement_threads: set[int] = set()
+        self.request_ids: list[str] = []
 
     def query_typed(self, **kwargs):
         with self._call_lock:
             self._call_number += 1
             call_number = self._call_number
+            self.request_ids.append(current_request_id())
         if call_number > 1:
             self.supplement_threads.add(get_ident())
             self._supplement_barrier.wait()
@@ -132,6 +135,27 @@ class DurationlessCoverageKbClient(CandidateCoverageKbClient):
     def query_typed(self, **kwargs):
         result = super().query_typed(**kwargs)
         result["query_plan"] = {"intent": "plan_candidates"}
+        return result
+
+
+class StaleHotelCoverageKbClient(CandidateCoverageKbClient):
+    def query_typed(self, **kwargs):
+        result = super().query_typed(**kwargs)
+        for item in result["recommendations"]:
+            if item["entity_type"] != "hotel":
+                continue
+            item["attributes"]["hotel_availability"] = {
+                "selected_window_index": None,
+                "windows": [
+                    {
+                        "requested_check_in": "2026-08-27",
+                        "stay_nights": 1,
+                        "lookup_status": "available",
+                        "availability": "unavailable",
+                        "offers": [],
+                    }
+                ],
+            }
         return result
 
 
@@ -188,6 +212,32 @@ class FakeWeatherClient:
         ]
 
 
+class ContextCapturingKbClient(FakeKbClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request_ids: list[str] = []
+
+    def query_typed(self, **kwargs):
+        self.request_ids.append(current_request_id())
+        return super().query_typed(**kwargs)
+
+
+class ContextCapturingWeatherClient(FakeWeatherClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request_ids: list[str] = []
+
+    def forecast_range(self, latitude, longitude, start_date, duration_days, today):
+        self.request_ids.append(current_request_id())
+        return super().forecast_range(
+            latitude,
+            longitude,
+            start_date,
+            duration_days,
+            today,
+        )
+
+
 class FakeSynthesizer:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -233,6 +283,30 @@ def test_orchestrator_routes_itinerary_through_graph_weather_and_planning() -> N
     assert plan.run_graph is True
     assert plan.run_weather is True
     assert plan.run_planning is True
+
+
+def test_orchestrator_propagates_request_context_to_primary_tool_threads() -> None:
+    kb_client = ContextCapturingKbClient()
+    weather_client = ContextCapturingWeatherClient()
+    token = set_request_id("request-context-primary-tools")
+    try:
+        TravelOrchestrator(kb_client, weather_client).run(
+            message="Gá»£i Ã½ Ä‘á»‹a Ä‘iá»ƒm vÃ  xem thá»i tiáº¿t ÄÃ  Náºµng",
+            session_id="context-primary-tools",
+            city="ÄÃ  Náºµng",
+            entity_types=None,
+            top_k=5,
+            kb_version="v4",
+            travel_date=date(2026, 8, 28),
+            include_weather=True,
+            latitude=16.05,
+            longitude=108.2,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert kb_client.request_ids == ["request-context-primary-tools"]
+    assert weather_client.request_ids == ["request-context-primary-tools"]
 
 
 def test_orchestrator_supplements_generic_results_with_required_entity_coverage() -> (
@@ -313,6 +387,29 @@ def test_orchestrator_runs_typed_candidate_supplements_in_parallel() -> None:
     assert entity_order == ["cafe", "attraction", "restaurant", "hotel"]
 
 
+def test_orchestrator_propagates_request_context_to_candidate_threads() -> None:
+    kb_client = ParallelCandidateCoverageKbClient()
+    token = set_request_id("request-context-coverage")
+    try:
+        TravelOrchestrator(kb_client, None).run(
+            message="LÃªn lá»‹ch trÃ¬nh Quy NhÆ¡n 3 ngÃ y 2 Ä‘Ãªm",
+            session_id="context-planning-candidates",
+            city="Quy NhÆ¡n",
+            entity_types=None,
+            top_k=5,
+            kb_version="v8",
+            travel_date=None,
+            include_weather=False,
+            latitude=None,
+            longitude=None,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert kb_client.request_ids
+    assert set(kb_client.request_ids) == {"request-context-coverage"}
+
+
 def test_orchestrator_resolves_trip_duration_before_current_data() -> None:
     current_data = CapturingCurrentData()
 
@@ -337,6 +434,32 @@ def test_orchestrator_resolves_trip_duration_before_current_data() -> None:
     assert result.graph.query_plan["duration_nights"] == 2
     assert current_data.hotel_requests
     assert current_data.hotel_requests[0]["stay_nights"] == 2
+
+
+def test_orchestrator_replaces_stale_kb_hotel_context_before_planning() -> None:
+    current_data = CapturingCurrentData()
+
+    result = TravelOrchestrator(
+        StaleHotelCoverageKbClient(),
+        None,
+        current_data_client=current_data,
+    ).run(
+        message="Len lich trinh Quy Nhon 3 ngay 2 dem",
+        session_id="stale-hotel-context",
+        city="Quy Nhon",
+        entity_types=None,
+        top_k=5,
+        kb_version="v8",
+        travel_date=date(2026, 8, 28),
+        include_weather=False,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert current_data.hotel_requests
+    assert current_data.hotel_requests[0]["stay_nights"] == 2
+    assert result.planning_trace["status"] == "completed"
+    assert len(result.graph.itinerary) == 3
 
 
 @pytest.mark.parametrize("message", ["hello", "Xin chào!", "Hi NexTrip"])
