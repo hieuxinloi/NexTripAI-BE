@@ -321,6 +321,24 @@ class TravelOrchestrator:
             )
 
         if plan.run_planning:
+            duration_days = requested_itinerary_duration_days(
+                message,
+                graph.query_plan,
+            )
+            duration_nights = requested_itinerary_duration_nights(
+                message,
+                duration_days,
+                graph.query_plan,
+            )
+            graph = graph.model_copy(
+                update={
+                    "query_plan": {
+                        **graph.query_plan,
+                        "duration_days": duration_days,
+                        "duration_nights": duration_nights,
+                    }
+                }
+            )
             graph, candidate_coverage_trace = self._supplement_planning_candidates(
                 graph,
                 message=message,
@@ -330,6 +348,8 @@ class TravelOrchestrator:
                 kb_version=kb_version,
                 conversation_context=conversation_context,
                 weather_forecast=weather_forecast,
+                duration_days=duration_days,
+                duration_nights=duration_nights,
             )
             trace.append(candidate_coverage_trace)
             graph, preplanning_current_trace = enrich_current_data(
@@ -384,16 +404,14 @@ class TravelOrchestrator:
         kb_version: KbVersion,
         conversation_context: dict[str, Any] | None,
         weather_forecast: list[WeatherAssessment],
+        duration_days: int,
+        duration_nights: int,
     ) -> tuple[AgentResult, dict[str, Any]]:
-        duration_days = requested_itinerary_duration_days(message, graph.query_plan)
-        duration_nights = requested_itinerary_duration_nights(
-            message,
-            duration_days,
-        )
         requirements = _candidate_coverage_requirements(
             duration_days=duration_days,
             duration_nights=duration_nights,
             policy=self.planning_policy,
+            weather_forecast=weather_forecast,
         )
         if not requirements or graph.error:
             return graph, {
@@ -406,6 +424,7 @@ class TravelOrchestrator:
         evidence = list(graph.evidence)
         requests: list[dict[str, Any]] = []
         rainy_trip = any(item.suitability == "unsuitable" for item in weather_forecast)
+        pending: list[tuple[_CandidateCoverageRequirement, int, str, int]] = []
         for requirement in requirements:
             before = _count_eligible_candidates(
                 evidence,
@@ -424,15 +443,36 @@ class TravelOrchestrator:
                 self.planning_policy.supplemental_candidate_limit,
                 max(requirement.minimum - before, requirement.minimum),
             )
-            supplemental = self._run_graph(
-                message=query,
-                session_id=f"{session_id}:coverage:{requirement.name}",
-                city=city,
-                entity_types=[requirement.query_entity_type],
-                top_k=request_top_k,
-                kb_version=kb_version,
-                conversation_context=conversation_context,
-            )
+            pending.append((requirement, before, query, request_top_k))
+
+        supplemental_results: list[AgentResult] = []
+        if pending:
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(pending)),
+                thread_name_prefix="nextrip-coverage",
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        self._run_graph,
+                        message=query,
+                        session_id=f"{session_id}:coverage:{requirement.name}",
+                        city=city,
+                        entity_types=[requirement.query_entity_type],
+                        top_k=request_top_k,
+                        kb_version=kb_version,
+                        conversation_context=conversation_context,
+                    )
+                    for requirement, _, query, request_top_k in pending
+                ]
+                # Consume results in requirement order so evidence and trace
+                # remain deterministic even though the I/O is concurrent.
+                supplemental_results = [future.result() for future in futures]
+
+        for (requirement, before, _, _), supplemental in zip(
+            pending,
+            supplemental_results,
+            strict=True,
+        ):
             accepted = [
                 item
                 for item in supplemental.evidence
@@ -575,6 +615,7 @@ def _candidate_coverage_requirements(
     duration_days: int,
     duration_nights: int,
     policy: PlanningPolicy,
+    weather_forecast: list[WeatherAssessment],
 ) -> list[_CandidateCoverageRequirement]:
     full_trip = (
         duration_nights > 0
@@ -582,12 +623,21 @@ def _candidate_coverage_requirements(
     )
     if not full_trip:
         return []
+    unsuitable_days = sum(
+        item.suitability == "unsuitable"
+        for item in weather_forecast[:duration_days]
+    )
+    activity_days = (
+        duration_days
+        if not weather_forecast
+        else max(1, duration_days - unsuitable_days)
+    )
     requirements = [
         _CandidateCoverageRequirement(
             name="activity",
             accepted_entity_types=frozenset({"attraction", "nightlife"}),
             query_entity_type="attraction",
-            minimum=duration_days * policy.activity_candidates_per_day,
+            minimum=activity_days * policy.activity_candidates_per_day,
             query_label="địa điểm tham quan",
         ),
         _CandidateCoverageRequirement(

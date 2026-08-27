@@ -37,7 +37,7 @@ from src.core_ai.nextrip_agent.conversation import (
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.planning import is_itinerary_request
 from src.core_ai.nextrip_agent.schemas import AgentResult
-from src.core_ai.nextrip_agent.synthesizer import synthesize_answer
+from src.core_ai.nextrip_agent.synthesizer import SynthesisResult, synthesize_answer
 from src.core_ai.nextrip_agent.trip_plan import (
     ActiveTripPlan,
     PlanChange,
@@ -703,6 +703,39 @@ def handle_chat(
         # response independent and leave the active plan untouched.
         response_active_plan = active_plan
         agent_result = agent_result.model_copy(update={"itinerary": []})
+    planning_unavailable = bool(
+        orchestration.plan.run_planning and not agent_result.itinerary
+    )
+    if planning_unavailable:
+        warnings = list(
+            dict.fromkeys([*agent_result.warnings, "planning_unavailable"])
+        )
+        if active_plan is not None:
+            # A failed replan must never erase a valid active revision. Return
+            # the last committed plan unchanged so the user can keep editing it.
+            response_active_plan = active_plan
+            agent_result = agent_result.model_copy(
+                update={
+                    "answer_type": "itinerary_planning",
+                    "evidence": active_plan.selected_places,
+                    "itinerary": active_plan.itinerary,
+                    "warnings": warnings,
+                }
+            )
+        else:
+            # Do not present a large candidate dump as if it were an itinerary.
+            # Candidates remain an internal planning input; a failed plan is an
+            # explicit partial outcome with no public pseudo-schedule.
+            agent_result = agent_result.model_copy(
+                update={
+                    "answer_type": "itinerary_planning",
+                    "evidence": [],
+                    "facts": [],
+                    "matched_paths": [],
+                    "itinerary": [],
+                    "warnings": warnings,
+                }
+            )
     evidence = [EvidenceItem.model_validate(item) for item in agent_result.evidence]
     nearby_suggestions = [
         EvidenceItem.model_validate(item) for item in nearby_suggestion_rows
@@ -730,17 +763,31 @@ def handle_chat(
             "party_size": response_active_plan.constraints.get("party_size", 2),
             "rooms": response_active_plan.constraints.get("rooms", 1),
         }
-    synthesis = synthesize_answer(
-        question=request.message,
-        kb_version=request.kb_version,
-        graph=agent_result,
-        graph_used=orchestration.plan.run_graph,
-        weather=weather,
-        weather_requested=orchestration.plan.run_weather,
-        weather_trace=orchestration.weather_trace,
-        answer_generator=answer_generator,
-        conversation_context=answer_context or None,
-    )
+    if planning_unavailable:
+        synthesis = SynthesisResult(
+            answer=_planning_unavailable_answer(response_active_plan),
+            unresolved_tools=[],
+            trace={
+                "node": "answer_synthesizer",
+                "status": "fallback",
+                "generator": "planning_guard",
+                "reason": orchestration.planning_trace.get("reason")
+                or "planning_unavailable",
+                "sources": [],
+            },
+        )
+    else:
+        synthesis = synthesize_answer(
+            question=request.message,
+            kb_version=request.kb_version,
+            graph=agent_result,
+            graph_used=orchestration.plan.run_graph,
+            weather=weather,
+            weather_requested=orchestration.plan.run_weather,
+            weather_trace=orchestration.weather_trace,
+            answer_generator=answer_generator,
+            conversation_context=answer_context or None,
+        )
     answer = synthesis.answer
     trace = [
         context.trace_event(),
@@ -1111,6 +1158,21 @@ def _local_plan_answer(plan: ActiveTripPlan, operation: PlanOperation) -> str:
     return (
         f"Đã cập nhật ràng buộc và ngân sách cho revision {plan.revision}. "
         "Các khoản chưa có giá xác minh vẫn được đánh dấu là chưa biết."
+    )
+
+
+def _planning_unavailable_answer(active_plan: ActiveTripPlan | None) -> str:
+    if active_plan is not None:
+        return (
+            "Mình chưa thể áp dụng lần sắp xếp mới vì chưa ghép được đầy đủ "
+            "địa điểm, giờ hoạt động và lưu trú phù hợp. Lịch trình hiện tại "
+            f"revision {active_plan.revision} vẫn được giữ nguyên."
+        )
+    return (
+        "Mình chưa thể tạo lịch trình theo từng ngày vì chưa ghép được đầy đủ "
+        "địa điểm, giờ hoạt động và khách sạn phù hợp với ngày cùng điều kiện "
+        "thời tiết hiện tại. Bạn có thể đổi ngày hoặc cho phép nới tiêu chí để "
+        "mình lập lại lịch trình."
     )
 
 

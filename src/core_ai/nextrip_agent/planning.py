@@ -252,7 +252,11 @@ def planning_agent_node(
         return graph, {"node": "planning", "status": "skipped"}
 
     duration_days = requested_itinerary_duration_days(message, graph.query_plan)
-    duration_nights = requested_itinerary_duration_nights(message, duration_days)
+    duration_nights = requested_itinerary_duration_nights(
+        message,
+        duration_days,
+        graph.query_plan,
+    )
     resolved_city = city or _single_candidate_city(graph.evidence)
     if resolved_city is None:
         missing = list(dict.fromkeys([*graph.missing_fields, "city"]))
@@ -464,7 +468,14 @@ def requested_itinerary_duration_days(
     return min(int(match.group(1)), 30) if match else 1
 
 
-def requested_itinerary_duration_nights(message: str, duration_days: int) -> int:
+def requested_itinerary_duration_nights(
+    message: str,
+    duration_days: int,
+    query_plan: dict[str, Any] | None = None,
+) -> int:
+    planned = (query_plan or {}).get("duration_nights")
+    if isinstance(planned, int) and not isinstance(planned, bool) and planned >= 0:
+        return min(planned, max(duration_days, 1), 30)
     match = re.search(r"\b(\d{1,2})\s*dem\b", normalize_text(message))
     if match:
         return min(int(match.group(1)), max(duration_days, 1))
@@ -563,9 +574,24 @@ def _validate_plan(
             role_locations.append((day.day, stop))
         if full_trip_coverage and ItineraryRole.MEAL not in day_roles:
             raise ValueError("itinerary_daily_meal_missing")
-        if full_trip_coverage and ItineraryRole.ACTIVITY not in day_roles:
+        if (
+            full_trip_coverage
+            and ItineraryRole.ACTIVITY not in day_roles
+            and not (
+                day_weather is not None
+                and day_weather.suitability == "unsuitable"
+            )
+        ):
             raise ValueError("itinerary_daily_activity_missing")
-    if full_trip_coverage and ItineraryRole.ACTIVITY not in roles:
+    safe_activity_available = any(
+        item.get("entity_type") in {"attraction", "nightlife"}
+        for item in candidates
+    )
+    if (
+        full_trip_coverage
+        and safe_activity_available
+        and ItineraryRole.ACTIVITY not in roles
+    ):
         raise ValueError("itinerary_activity_missing")
     if (
         full_trip_coverage
@@ -1301,7 +1327,13 @@ def _resolve_stay_hotel(
     if selected is None:
         raise ValueError("semantic_stay_contains_ungrounded_hotel")
     if not _hotel_candidate_is_selectable(selected):
-        raise ValueError("semantic_stay_hotel_unavailable")
+        replacement = next(
+            (item for item in hotels if _hotel_candidate_is_selectable(item)),
+            None,
+        )
+        if replacement is None:
+            raise ValueError("semantic_stay_hotel_unavailable")
+        return replacement
     return selected
 
 

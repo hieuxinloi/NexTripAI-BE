@@ -49,6 +49,23 @@ def synthesize_answer(
         if "weather" not in unresolved_tools:
             unresolved_tools.append("weather")
 
+    if graph.itinerary:
+        return SynthesisResult(
+            answer=_itinerary_intro(
+                graph=graph,
+                weather=weather,
+                weather_requested=weather_requested,
+                weather_trace=weather_trace,
+            ),
+            unresolved_tools=unresolved_tools,
+            trace={
+                "node": "answer_synthesizer",
+                "status": "completed",
+                "generator": "deterministic_itinerary_intro",
+                "sources": _source_names(graph_used, weather),
+            },
+        )
+
     has_graph_context = graph_used and bool(graph.evidence or graph.facts)
     if has_graph_context and answer_generator is None:
         raise AnswerGenerationUnavailableError(
@@ -169,6 +186,22 @@ def format_weather_answer(weather: WeatherAssessment) -> str:
         f"Thời tiết {weather.location} ngày {weather.forecast_date:%d/%m}: "
         f"{weather.condition}{temperature}{rain}. {weather.advice}"
     )
+
+
+def _itinerary_intro(
+    *,
+    graph: AgentResult,
+    weather: WeatherAssessment | None,
+    weather_requested: bool,
+    weather_trace: dict[str, Any],
+) -> str:
+    day_count = len(graph.itinerary)
+    intro = f"Lịch trình {day_count} ngày đã được sắp xếp theo các địa điểm đã xác minh."
+    if weather is not None:
+        return f"{intro} {format_weather_answer(weather)}"
+    if weather_requested and weather_trace.get("status") == "unavailable":
+        return f"{intro} Mình chưa thể lấy dữ liệu thời tiết lúc này."
+    return intro
 
 
 def _fallback_answer(

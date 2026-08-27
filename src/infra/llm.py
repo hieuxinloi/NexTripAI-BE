@@ -60,6 +60,44 @@ When conversation_memory.budget_summary is present, state its grounded estimated
 coverage and exclusions. A partial estimate is not proof that the whole trip fits budget.
 """
 
+
+_PRESENTATION_AMENITY_LABELS = {
+    "beach_access": "lối ra biển",
+    "rocky_beach": "bãi đá ven biển",
+    "is_indoor": "không gian trong nhà",
+}
+
+_PRESENTATION_ATTRIBUTE_FIELDS = (
+    "address",
+    "description",
+    "highlights",
+    "opening_hours_open",
+    "opening_hours_close",
+    "duration_recommendation",
+    "rating",
+    "review_count",
+    "price_per_person_min",
+    "price_per_person_max",
+    "price_range_min",
+    "price_range_max",
+    "drink_price_min",
+    "drink_price_max",
+    "entry_fee_min",
+    "entry_fee_max",
+    "ticket_price_adult",
+    "ticket_price_child",
+    "ticket_price_student",
+    "ticket_price_elderly",
+    "distance_to_center",
+    "distance_to_beach",
+)
+
+_INTERNAL_PRESENTATION_TOKEN = re.compile(
+    r"(?<![\w])(?:beach_access|rocky_beach|is_indoor)(?![\w])",
+    flags=re.IGNORECASE,
+)
+_RAW_BOOLEAN_TOKEN = re.compile(r"(?<![\w])(?:true|false)(?![\w])", re.IGNORECASE)
+
 CONVERSATION_SYSTEM_INSTRUCTION = """You are NexTripAI's conversation contextualizer.
 Read the ordered transcript and decide how the current user turn should be handled.
 
@@ -490,7 +528,9 @@ class GeminiAnswerGenerator:
             answer_type=answer_type,
             evidence=evidence,
         )
-        grounded_answer = _restore_references(raw_answer, replacements)
+        grounded_answer = _guard_presentation_output(
+            _restore_references(raw_answer, replacements)
+        )
         usage = response.usage_metadata
         input_tokens = int(usage.prompt_token_count or 0) if usage else 0
         output_tokens = int(usage.candidates_token_count or 0) if usage else 0
@@ -552,8 +592,8 @@ def _protected_context(
                 "reference": reference,
                 "city": city_reference,
                 "entity_type": place.get("entity_type"),
-                "category": place.get("category"),
-                "attributes": place.get("attributes") or {},
+                "category": _presentation_value(place.get("category")),
+                "attributes": _presentation_attributes(place.get("attributes")),
             }
         )
 
@@ -706,6 +746,117 @@ def _planning_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "distance_km": item.get("distance_km"),
         "attributes": supported_attributes,
     }
+
+
+def _presentation_attributes(value: object) -> dict[str, Any]:
+    """Return the small, human-facing subset allowed into answer prompts."""
+
+    if not isinstance(value, dict):
+        return {}
+    presented: dict[str, Any] = {}
+    for key in _PRESENTATION_ATTRIBUTE_FIELDS:
+        if key not in value:
+            continue
+        safe_value = _presentation_value(value[key])
+        if safe_value is not None and safe_value != []:
+            presented[key] = safe_value
+
+    amenities = value.get("amenities")
+    if isinstance(amenities, list):
+        labels = [
+            label
+            for item in amenities
+            if (label := _presentation_amenity(item)) is not None
+        ]
+        if labels:
+            presented["amenities"] = list(dict.fromkeys(labels))
+
+    indoor = value.get("is_indoor", value.get("indoor"))
+    if isinstance(indoor, bool):
+        presented["space"] = "trong nhà" if indoor else "ngoài trời"
+
+    current = value.get("current")
+    if isinstance(current, dict):
+        current_view: dict[str, Any] = {}
+        for key in (
+            "business_status",
+            "opening_hours_open",
+            "opening_hours_close",
+            "price_level",
+            "price_min",
+            "price_max",
+            "updated_at",
+        ):
+            safe_value = _presentation_value(current.get(key))
+            if safe_value is not None:
+                current_view[key] = safe_value
+        if isinstance(current.get("open_now"), bool):
+            current_view["opening_status"] = (
+                "đang mở cửa" if current["open_now"] else "đang đóng cửa"
+            )
+        if current_view:
+            presented["current"] = current_view
+    return presented
+
+
+def _presentation_amenity(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compact = value.strip()
+    if not compact:
+        return None
+    normalized = compact.casefold().replace("-", "_").replace(" ", "_")
+    mapped = _PRESENTATION_AMENITY_LABELS.get(normalized)
+    if mapped is not None:
+        return mapped
+    # Natural-language amenities remain useful; unknown machine slugs do not.
+    if "_" in compact or (compact.isascii() and " " not in compact):
+        return None
+    return compact
+
+
+def _presentation_value(value: object) -> Any | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        compact = value.strip()
+        if not compact:
+            return None
+        mapped = _PRESENTATION_AMENITY_LABELS.get(compact.casefold())
+        if mapped is not None:
+            return mapped
+        if _INTERNAL_PRESENTATION_TOKEN.search(compact):
+            return None
+        return compact
+    if isinstance(value, list):
+        return [
+            item
+            for raw in value
+            if (item := _presentation_value(raw)) is not None
+        ]
+    return None
+
+
+def _guard_presentation_output(answer: str) -> str:
+    """Translate known slugs and raw booleans before user delivery."""
+
+    guarded = answer
+    for token, label in _PRESENTATION_AMENITY_LABELS.items():
+        guarded = re.sub(
+            rf"(?<![\w]){re.escape(token)}(?![\w])",
+            label,
+            guarded,
+            flags=re.IGNORECASE,
+        )
+    guarded = _RAW_BOOLEAN_TOKEN.sub(
+        lambda match: "có" if match.group(0).casefold() == "true" else "không",
+        guarded,
+    )
+    if _INTERNAL_PRESENTATION_TOKEN.search(guarded) or _RAW_BOOLEAN_TOKEN.search(guarded):
+        raise RuntimeError("answer contains internal presentation tokens")
+    return guarded
 
 
 def _compact_itinerary_transport(value: Any) -> dict[str, Any] | None:

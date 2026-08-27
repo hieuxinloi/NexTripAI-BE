@@ -131,6 +131,25 @@ def test_plan_has_stable_slots_route_units_and_partial_grounded_budget():
     assert plan.budget_summary.missing_place_ids == ["rest_qn_001"]
 
 
+def test_query_plan_recognizes_the_per_day_follow_up() -> None:
+    plan = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=_evidence(),
+        city="Quy Nhơn",
+        start_date=date(2026, 9, 1),
+        duration_days=1,
+        operation=PlanOperation.CREATE,
+    )
+
+    mutation = resolve_plan_mutation(
+        "Lịch trình cho từng ngày sẽ như nào?",
+        plan,
+    )
+
+    assert mutation.operation is PlanOperation.QUERY_PLAN
+    assert mutation.expected_revision == plan.revision
+
+
 def test_replace_preserves_slot_id_and_only_invalidates_adjacent_legs():
     plan = build_active_trip_plan(
         itinerary=_itinerary(),

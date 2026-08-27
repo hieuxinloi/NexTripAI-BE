@@ -12,6 +12,7 @@ from src.apis.domains.chat.schemas import (
 )
 from src.apis.domains.chat.service import (
     _build_clarification,
+    _planning_unavailable_answer,
     _record_grounded_place_interest,
     _resolve_effective_travel_date,
     handle_chat,
@@ -226,6 +227,34 @@ class FakeV8AddCandidateClient(FakeV8ItineraryClient):
                         "price_per_person_min": 35_000,
                         "price_per_person_max": 60_000,
                     },
+                }
+            ],
+            "itinerary": [],
+            "missing_fields": [],
+            "trace": [],
+        }
+
+
+class FakeV8PlanningFailureClient(FakeV8ItineraryClient):
+    def query_typed(
+        self,
+        *,
+        query,
+        top_k,
+        kb_version="v8",
+        conversation_context=None,
+    ):
+        return {
+            "kb_version": "v8",
+            "answer_type": "recommendation",
+            "recommendations": [
+                {
+                    "place_id": "attr_qn_001",
+                    "name": "Điểm thử nghiệm",
+                    "city": "Quy Nhơn",
+                    "entity_type": "attraction",
+                    "category": "attraction",
+                    "attributes": {"beach_access": True},
                 }
             ],
             "itinerary": [],
@@ -1038,6 +1067,50 @@ def test_unverified_geo_scope_is_reported_as_data_gap() -> None:
         "chưa có địa điểm với quan hệ vị trí đủ tin cậy tại Tuy Phước"
         in state["answer"]
     )
+
+
+def test_failed_planning_does_not_return_candidates_as_an_itinerary() -> None:
+    generator = FakeAnswerGenerator("candidate dump must not be used")
+
+    response = handle_chat(
+        ChatRequest(
+            message="Lên lịch trình 3 ngày du lịch tại Quy Nhơn",
+            session_id="planning-fail-closed",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8PlanningFailureClient(),
+        generator,
+    )
+
+    assert response.intent == "itinerary_planning"
+    assert response.itinerary == []
+    assert response.active_trip_plan is None
+    assert response.evidence == []
+    assert "planning_unavailable" in response.warnings
+    assert "theo từng ngày" in response.answer
+    assert "beach_access" not in response.answer
+    assert generator.calls == []
+
+
+def test_planning_unavailable_message_preserves_the_active_revision() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Lên lịch trình một ngày ở Quy Nhơn",
+            session_id="planning-preserve-message",
+            city="Quy Nhơn",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    assert first.active_trip_plan is not None
+    answer = _planning_unavailable_answer(first.active_trip_plan)
+    assert f"revision {first.active_trip_plan.revision}" in answer
+    assert "giữ nguyên" in answer
 
 
 def test_internal_query_constraint_is_rendered_as_natural_clarification() -> None:

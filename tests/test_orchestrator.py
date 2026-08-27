@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from threading import Barrier, Lock, get_ident
 
 import pytest
 
@@ -106,6 +107,57 @@ class CandidateCoverageKbClient:
             "constraint_results": [],
             "required_tools": [],
             "trace": [],
+        }
+
+
+class ParallelCandidateCoverageKbClient(CandidateCoverageKbClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self._call_lock = Lock()
+        self._call_number = 0
+        self._supplement_barrier = Barrier(3, timeout=2)
+        self.supplement_threads: set[int] = set()
+
+    def query_typed(self, **kwargs):
+        with self._call_lock:
+            self._call_number += 1
+            call_number = self._call_number
+        if call_number > 1:
+            self.supplement_threads.add(get_ident())
+            self._supplement_barrier.wait()
+        return super().query_typed(**kwargs)
+
+
+class DurationlessCoverageKbClient(CandidateCoverageKbClient):
+    def query_typed(self, **kwargs):
+        result = super().query_typed(**kwargs)
+        result["query_plan"] = {"intent": "plan_candidates"}
+        return result
+
+
+class CapturingCurrentData:
+    def __init__(self) -> None:
+        self.hotel_requests: list[dict] = []
+
+    def places(self, place_ids):
+        return {"items": []}
+
+    def hotel_availability(self, **kwargs):
+        self.hotel_requests.append(kwargs)
+        return {"results": []}
+
+    def recommend_transport(self, **kwargs):
+        return {
+            "status": "recommended",
+            "recommended_mode": "drive",
+            "options": [
+                {
+                    "recommended": True,
+                    "distance_meters": 1000,
+                    "duration_seconds": 600,
+                    "route": {"route": {"provider": "here"}},
+                }
+            ],
         }
 
 
@@ -227,6 +279,64 @@ def test_orchestrator_supplements_generic_results_with_required_entity_coverage(
         (1, "check_in", "hotel_qn_001"),
         (3, "check_out", "hotel_qn_001"),
     ]
+
+
+def test_orchestrator_runs_typed_candidate_supplements_in_parallel() -> None:
+    kb_client = ParallelCandidateCoverageKbClient()
+
+    result = TravelOrchestrator(kb_client, None).run(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        session_id="parallel-planning-candidates",
+        city="Quy Nhơn",
+        entity_types=None,
+        top_k=5,
+        kb_version="v8",
+        travel_date=None,
+        include_weather=False,
+        latitude=None,
+        longitude=None,
+    )
+
+    coverage = next(
+        item for item in result.trace if item["node"] == "planning_candidate_coverage"
+    )
+    assert coverage["status"] == "completed"
+    assert [item["requirement"] for item in coverage["requests"]] == [
+        "activity",
+        "meal",
+        "hotel",
+    ]
+    assert len(kb_client.supplement_threads) == 3
+    entity_order = list(
+        dict.fromkeys(item["entity_type"] for item in result.graph.evidence)
+    )
+    assert entity_order == ["cafe", "attraction", "restaurant", "hotel"]
+
+
+def test_orchestrator_resolves_trip_duration_before_current_data() -> None:
+    current_data = CapturingCurrentData()
+
+    result = TravelOrchestrator(
+        DurationlessCoverageKbClient(),
+        None,
+        current_data_client=current_data,
+    ).run(
+        message="Lên lịch trình Quy Nhơn 3 ngày 2 đêm",
+        session_id="resolved-planning-duration",
+        city="Quy Nhơn",
+        entity_types=None,
+        top_k=5,
+        kb_version="v8",
+        travel_date=date(2026, 8, 28),
+        include_weather=False,
+        latitude=None,
+        longitude=None,
+    )
+
+    assert result.graph.query_plan["duration_days"] == 3
+    assert result.graph.query_plan["duration_nights"] == 2
+    assert current_data.hotel_requests
+    assert current_data.hotel_requests[0]["stay_nights"] == 2
 
 
 @pytest.mark.parametrize("message", ["hello", "Xin chào!", "Hi NexTrip"])

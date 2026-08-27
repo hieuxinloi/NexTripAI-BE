@@ -464,7 +464,7 @@ def test_hybrid_scheduler_uses_actual_route_duration_before_fixing_next_start() 
     assert routes.calls
 
 
-def test_hybrid_rejects_unavailable_semantic_hotel_and_falls_back_to_available() -> (
+def test_hybrid_substitutes_unavailable_semantic_hotel_with_grounded_available() -> (
     None
 ):
     candidates = _candidates()
@@ -500,12 +500,97 @@ def test_hybrid_rejects_unavailable_semantic_hotel_and_falls_back_to_available()
         for slot in day["slots"]
         if slot["entity_type"] == "hotel"
     }
-    assert trace["planner"] == "deterministic_fallback"
+    assert trace["planner"] == "gemini_hybrid"
     assert hotel_ids == {"hotel_2"}
-    assert any(
-        warning.startswith("planning_fallback:ValueError")
-        for warning in result.warnings
+    assert not any(
+        warning.startswith("planning_fallback:") for warning in result.warnings
     )
+
+
+def test_unsuitable_weather_days_can_use_meals_and_cafes_without_activity() -> None:
+    candidates = [
+        _candidate("outdoor_1", "attraction", indoor=False),
+        _candidate("outdoor_2", "attraction", indoor=False),
+        _candidate("rest_1", "restaurant"),
+        _candidate("rest_2", "restaurant"),
+        _candidate("cafe_1", "cafe"),
+        _candidate("cafe_2", "cafe"),
+        _candidate("hotel_1", "hotel"),
+    ]
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 2},
+    )
+    weather = WeatherAssessment(
+        location=CITY,
+        forecast_date=date(2026, 8, 28),
+        condition="Có giông",
+        suitability="unsuitable",
+        advice="Ưu tiên hoạt động trong nhà.",
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 2 ngày 1 đêm",
+        graph=graph,
+        weather_forecast=[weather, weather],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    slots = [slot for day in result.itinerary for slot in day["slots"]]
+    assert trace["status"] == "completed"
+    assert not any(slot["role"] == "activity" for slot in slots)
+    assert all(
+        any(slot["role"] == "meal" for slot in day["slots"])
+        for day in result.itinerary
+    )
+    assert not any(slot["place_id"].startswith("outdoor_") for slot in slots)
+
+
+def test_unsuitable_trip_keeps_one_activity_when_safe_candidate_exists() -> None:
+    candidates = [
+        _candidate("indoor_1", "attraction", indoor=True),
+        _candidate("outdoor_1", "attraction", indoor=False),
+        _candidate("rest_1", "restaurant"),
+        _candidate("rest_2", "restaurant"),
+        _candidate("cafe_1", "cafe"),
+        _candidate("cafe_2", "cafe"),
+        _candidate("hotel_1", "hotel"),
+    ]
+    graph = AgentResult(
+        answer="",
+        evidence=candidates,
+        query_plan={"intent": "plan_candidates", "duration_days": 2},
+    )
+    weather = WeatherAssessment(
+        location=CITY,
+        forecast_date=date(2026, 8, 28),
+        condition="Mưa lớn",
+        suitability="unsuitable",
+        advice="Ưu tiên hoạt động trong nhà.",
+    )
+
+    result, trace = planning_agent_node(
+        message="Lên lịch trình Quy Nhơn 2 ngày 1 đêm",
+        graph=graph,
+        weather_forecast=[weather, weather],
+        planner=None,
+        city=CITY,
+        latitude=None,
+        longitude=None,
+    )
+
+    activity_ids = [
+        slot["place_id"]
+        for day in result.itinerary
+        for slot in day["slots"]
+        if slot["role"] == "activity"
+    ]
+    assert trace["status"] == "completed"
+    assert activity_ids == ["indoor_1"]
 
 
 def test_planning_fallback_drops_wrong_city_and_outdoor_places_in_bad_weather() -> None:

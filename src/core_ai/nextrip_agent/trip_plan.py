@@ -300,7 +300,14 @@ def resolve_plan_mutation(
 
     if any(
         term in plain
-        for term in ("xem lich trinh", "lich trinh hien tai", "plan hien tai")
+        for term in (
+            "xem lich trinh",
+            "lich trinh hien tai",
+            "lich trinh tung ngay",
+            "lich trinh cho tung ngay",
+            "chi tiet lich trinh",
+            "plan hien tai",
+        )
     ):
         return PlanMutation(operation=PlanOperation.QUERY_PLAN, **common)
     if any(

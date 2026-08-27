@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from src.infra.llm import (
     GeminiAnswerGenerator,
     GeminiConversationContextualizer,
     _ensure_single_entity_reference,
+    _guard_presentation_output,
     _protected_context,
     _restore_references,
 )
@@ -273,6 +275,57 @@ def test_telemetry_bills_thinking_tokens_as_output(monkeypatch) -> None:
         {"model": "test-model", "direction": "thinking"},
     )
     assert cost_records == [(0.000525, {"model": "test-model"})]
+
+
+def test_grounded_context_exposes_only_sanitized_presentation_attributes() -> None:
+    context, _ = _protected_context(
+        question="Khach san co tien ich gi?",
+        answer_type="entity_detail",
+        evidence=[{
+            "place_id": "hotel_qn_001",
+            "name": "Hotel Test",
+            "city": "Quy Nhon",
+            "entity_type": "hotel",
+            "category": "hotel",
+            "attributes": {
+                "address": "01 Test",
+                "amenities": [
+                    "beach_access",
+                    "rocky_beach",
+                    "wifi mien phi",
+                    "unknown_internal_slug",
+                ],
+                "is_indoor": True,
+                "source_file": "hotel_final.json",
+                "embedding_text": "private retrieval text",
+                "unknown_boolean": False,
+            },
+        }],
+        facts=[],
+        matched_paths=[],
+    )
+
+    attributes = context["retrieved_places"][0]["attributes"]
+    serialized = json.dumps(context, ensure_ascii=False).casefold()
+    assert attributes == {
+        "address": "01 Test",
+        "amenities": ["lối ra biển", "bãi đá ven biển", "wifi mien phi"],
+        "space": "trong nhà",
+    }
+    assert "beach_access" not in serialized
+    assert "rocky_beach" not in serialized
+    assert "unknown_internal_slug" not in serialized
+    assert "source_file" not in serialized
+    assert "embedding_text" not in serialized
+    assert "true" not in serialized
+    assert "false" not in serialized
+
+
+def test_final_output_guard_translates_known_tokens_and_raw_boolean() -> None:
+    assert _guard_presentation_output(
+        "Khach san co beach_access va rocky_beach."
+    ) == "Khach san co lối ra biển va bãi đá ven biển."
+    assert _guard_presentation_output("is_indoor: true") == "không gian trong nhà: có"
 
 
 def test_grounded_answer_allows_omitted_city_reference() -> None:
