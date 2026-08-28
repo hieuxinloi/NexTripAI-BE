@@ -67,7 +67,8 @@ class Settings(BaseSettings):
     active_kb_version: str = Field(default="v8", pattern=r"^v[1-9][0-9]*$")
     kb_fallback_versions: str = ""
     allow_client_kb_version: bool = False
-    kb_request_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
+    kb_request_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
+    kb_request_timeout_ratio: float = Field(default=0.65, gt=0, lt=1)
     chat_request_timeout_seconds: float = Field(default=45.0, gt=1, le=120)
     rate_limit_requests: int = Field(default=30, ge=1, le=10_000)
     rate_limit_window_seconds: int = Field(default=60, ge=1, le=3_600)
@@ -100,6 +101,13 @@ class Settings(BaseSettings):
             if item.strip()
         ]
         return [item for item in versions if _KB_VERSION_PATTERN.fullmatch(item)]
+
+    @property
+    def effective_kb_request_timeout_seconds(self) -> float:
+        budget = self.chat_request_timeout_seconds * self.kb_request_timeout_ratio
+        if self.kb_request_timeout_seconds is None:
+            return budget
+        return min(self.kb_request_timeout_seconds, budget)
 
 
 @lru_cache

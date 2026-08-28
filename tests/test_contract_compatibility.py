@@ -72,6 +72,7 @@ def test_chat_response_keeps_fe_fields_and_adds_optional_current_context() -> No
     assert slot["place_id"] == "hotel_qn_001"
     assert slot["transport_to_next"]["provider"] == "here"
     assert slot["hotel_availability"]["selected_window_index"] == 0
+    assert response["planning"]["status"] == "skipped"
 
 
 def test_openapi_exposes_the_nested_itinerary_contract_for_fe_generation() -> None:
@@ -80,5 +81,6 @@ def test_openapi_exposes_the_nested_itinerary_contract_for_fe_generation() -> No
     assert "ItineraryDay" in schemas
     assert "ItinerarySlot" in schemas
     assert "TransportToNext" in schemas
+    assert "PlanningOutcome" in schemas
     assert "transport_to_next" in schemas["ItinerarySlot"]["properties"]
     assert "hotel_availability" in schemas["ItinerarySlot"]["properties"]

@@ -255,6 +255,45 @@ def test_vietnamese_add_intent_is_parsed_without_inventing_a_place():
     assert mutation.expected_revision == plan.revision
 
 
+def test_generic_add_intent_overrides_an_overbroad_model_replan():
+    plan = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=_evidence(),
+        city="Quy Nhon",
+        start_date=None,
+        duration_days=1,
+        operation=PlanOperation.CREATE,
+    )
+
+    mutation = resolve_plan_mutation(
+        "Th\u00eam \u0111\u1ecba  \u0111i\u1ec3m kh\u00e1c",
+        plan,
+        PlanMutation(operation=PlanOperation.REPLAN_ALL),
+    )
+
+    assert mutation.operation is PlanOperation.ADD_SLOT
+    assert mutation.replacement_place_name is None
+    assert mutation.expected_revision == plan.revision
+
+
+def test_suggestion_for_more_places_does_not_mutate_the_active_plan():
+    plan = build_active_trip_plan(
+        itinerary=_itinerary(),
+        evidence=_evidence(),
+        city="Quy Nhon",
+        start_date=None,
+        duration_days=1,
+        operation=PlanOperation.CREATE,
+    )
+
+    mutation = resolve_plan_mutation(
+        "Goi y them dia diem khac",
+        plan,
+    )
+
+    assert mutation.operation is PlanOperation.NONE
+
+
 def test_add_slot_uses_grounded_candidate_preserves_ids_and_invalidates_routes():
     plan = build_active_trip_plan(
         itinerary=_itinerary(),

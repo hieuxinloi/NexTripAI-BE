@@ -173,9 +173,27 @@ def resolve_plan_mutation(
     else:
         resolved = PlanMutation()
 
+    plain = " ".join(normalize_text(message).split())
     budget = extract_budget_vnd(message)
     occupancy = extract_occupancy(message)
     if resolved.operation is not PlanOperation.NONE:
+        if (
+            active_plan is not None
+            and resolved.operation
+            in {PlanOperation.REPLAN_ALL, PlanOperation.REPLAN_DAY}
+            and _is_add_command(plain)
+        ):
+            # A model may over-generalize an open-ended add request as a full
+            # replan. Preserve the explicit edit verb and let grounded
+            # discovery choose an unused candidate.
+            resolved = resolved.model_copy(
+                update={
+                    "operation": PlanOperation.ADD_SLOT,
+                    "target_slot_id": None,
+                    "target_place_name": None,
+                    "preserve_unaffected": True,
+                }
+            )
         if (
             resolved.operation is PlanOperation.REPLACE_SLOT
             and (budget is not None or occupancy)
@@ -204,7 +222,6 @@ def resolve_plan_mutation(
             if getattr(resolved, field_name) is None:
                 updates[field_name] = value
         if active_plan is not None:
-            plain = normalize_text(message)
             parsed_day = _first_int(plain, r"\bngay\s+(\d{1,2})\b")
             parsed_order = _first_int(
                 plain,
@@ -279,7 +296,6 @@ def resolve_plan_mutation(
             **occupancy,
         )
 
-    plain = normalize_text(message)
     day = _first_int(plain, r"\bngay\s+(\d{1,2})\b")
     order = _first_int(
         plain,
@@ -1529,10 +1545,31 @@ def _role_and_period(plain: str) -> tuple[str | None, Any]:
 
 
 def _is_add_command(plain: str) -> bool:
-    return bool(re.search(r"\b(?:them|chen|bo sung)\b", plain)) and any(
+    if not re.search(r"\b(?:them|chen|bo sung)\b", plain):
+        return False
+    has_plan_position = any(
         term in plain
-        for term in ("lich", "ngay", "slot", "vi tri", "sau ", "truoc ", "luc ")
+        for term in (
+            "vao lich",
+            "lich trinh",
+            "ngay",
+            "slot",
+            "vi tri",
+            "sau ",
+            "truoc ",
+            "luc ",
+        )
     )
+    if re.search(r"\b(?:goi y|de xuat)\b", plain) and not has_plan_position:
+        return False
+    has_generic_plan_item = bool(
+        re.search(
+            r"\b(?:dia diem|diem den|diem dung|hoat dong)"
+            r"(?:\s+(?:moi|khac|nua))?\b",
+            plain,
+        )
+    )
+    return has_plan_position or has_generic_plan_item
 
 
 def _is_move_command(plain: str) -> bool:
@@ -1607,6 +1644,13 @@ def _requested_added_place(plain: str, anchor_name: str | None) -> str | None:
         return None
     requested = match.group(1).strip(" ,.-")
     if anchor_name and normalize_text(anchor_name) == requested:
+        return None
+    if re.fullmatch(
+        r"(?:(?:mot|cac|nhung)\s+)?"
+        r"(?:dia diem|diem den|diem dung|hoat dong)"
+        r"(?:\s+(?:moi|khac|nua))*",
+        requested,
+    ):
         return None
     return requested or None
 

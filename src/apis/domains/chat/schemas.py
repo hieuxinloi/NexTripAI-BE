@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -107,6 +107,14 @@ class ItineraryDay(BaseModel):
     slots: list[ItinerarySlot]
 
 
+class PlanningOutcome(BaseModel):
+    status: Literal["skipped", "completed", "needs_input", "unavailable"] = "skipped"
+    reason: str | None = None
+    retryable: bool = False
+    candidate_count: int | None = Field(default=None, ge=0)
+    itinerary_days: int | None = Field(default=None, ge=0)
+
+
 class ChatResponse(BaseModel):
     session_id: str
     message_id: str
@@ -133,6 +141,7 @@ class ChatResponse(BaseModel):
     plan_change: PlanChange | None = None
     budget_summary: BudgetSummary | None = None
     nearby_suggestions: list[EvidenceItem] = Field(default_factory=list)
+    planning: PlanningOutcome = Field(default_factory=PlanningOutcome)
 
 
 class ChatMessage(BaseModel):

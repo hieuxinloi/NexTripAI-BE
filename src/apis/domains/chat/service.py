@@ -15,6 +15,7 @@ from src.apis.domains.chat.schemas import (
     Clarification,
     ClarificationOption,
     EvidenceItem,
+    PlanningOutcome,
 )
 from src.core_ai.nextrip_agent.answer_generation import SupportsAnswerGeneration
 from src.core_ai.nextrip_agent.current_data import (
@@ -534,6 +535,7 @@ def handle_chat(
         raise KnowledgeBaseUnavailableError(agent_result.error["message"])
     response_active_plan: ActiveTripPlan | None = None
     plan_change: PlanChange | None = None
+    replan_unchanged = False
     nearby_suggestion_rows: list[dict] = []
     if active_plan is not None and plan_mutation.operation in {
         PlanOperation.ADD_SLOT,
@@ -694,55 +696,84 @@ def handle_chat(
                 ]
             else:
                 operation = PlanOperation.REPLAN_ALL
-        response_active_plan = build_active_trip_plan(
-            itinerary=itinerary_for_revision,
-            evidence=evidence_for_revision,
-            city=effective_city or _itinerary_city(agent_result.itinerary),
-            start_date=effective_travel_date,
-            duration_days=(
-                active_plan.duration_days
-                if active_plan is not None
-                else _itinerary_duration(agent_result.itinerary)
-            ),
-            operation=operation,
-            previous=active_plan,
-            mutation=plan_mutation,
-            travel_date_assumed=travel_date_assumed,
-        )
-        changed_slot_ids = (
-            _slot_ids_for_day(response_active_plan.itinerary, target_day or 1)
-            if active_plan is not None and operation is PlanOperation.REPLAN_DAY
-            else _all_slot_ids(response_active_plan)
-        )
-        plan_change = PlanChange(
-            operation=operation,
-            previous_revision=active_plan.revision if active_plan else None,
-            revision=response_active_plan.revision,
-            changed_slot_ids=changed_slot_ids,
-            preserved_slot_ids=preserved_slot_ids,
-            message=(
-                "created_plan"
-                if active_plan is None
-                else (
-                    f"replanned_day:{target_day}"
-                    if operation is PlanOperation.REPLAN_DAY
-                    else "replanned_all"
-                )
-            ),
-        )
-        _persist_active_trip_plan(
-            chat_store,
-            request.session_id,
-            response_active_plan,
-            expected_revision=active_plan.revision if active_plan else None,
-            user_id=user_id,
-        )
-        agent_result = agent_result.model_copy(
-            update={
-                "evidence": response_active_plan.selected_places,
-                "itinerary": response_active_plan.itinerary,
-            }
-        )
+        if (
+            active_plan is not None
+            and operation in {PlanOperation.REPLAN_ALL, PlanOperation.REPLAN_DAY}
+            and plan_mutation.operation
+            in {PlanOperation.REPLAN_ALL, PlanOperation.REPLAN_DAY}
+            and _itinerary_place_signature(itinerary_for_revision)
+            == _itinerary_place_signature(active_plan.itinerary)
+        ):
+            replan_unchanged = True
+            response_active_plan = active_plan
+            plan_change = PlanChange(
+                operation=operation,
+                previous_revision=active_plan.revision,
+                revision=active_plan.revision,
+                preserved_slot_ids=_all_slot_ids(active_plan),
+                message="replan_not_applied",
+            )
+            agent_result = agent_result.model_copy(
+                update={
+                    "evidence": active_plan.selected_places,
+                    "itinerary": active_plan.itinerary,
+                    "warnings": list(
+                        dict.fromkeys(
+                            [*agent_result.warnings, "plan_replan_unchanged"]
+                        )
+                    ),
+                }
+            )
+        else:
+            response_active_plan = build_active_trip_plan(
+                itinerary=itinerary_for_revision,
+                evidence=evidence_for_revision,
+                city=effective_city or _itinerary_city(agent_result.itinerary),
+                start_date=effective_travel_date,
+                duration_days=(
+                    active_plan.duration_days
+                    if active_plan is not None
+                    else _itinerary_duration(agent_result.itinerary)
+                ),
+                operation=operation,
+                previous=active_plan,
+                mutation=plan_mutation,
+                travel_date_assumed=travel_date_assumed,
+            )
+            changed_slot_ids = (
+                _slot_ids_for_day(response_active_plan.itinerary, target_day or 1)
+                if active_plan is not None and operation is PlanOperation.REPLAN_DAY
+                else _all_slot_ids(response_active_plan)
+            )
+            plan_change = PlanChange(
+                operation=operation,
+                previous_revision=active_plan.revision if active_plan else None,
+                revision=response_active_plan.revision,
+                changed_slot_ids=changed_slot_ids,
+                preserved_slot_ids=preserved_slot_ids,
+                message=(
+                    "created_plan"
+                    if active_plan is None
+                    else (
+                        f"replanned_day:{target_day}"
+                        if operation is PlanOperation.REPLAN_DAY
+                        else "replanned_all"
+                    )
+                ),
+            )
+            _persist_active_trip_plan(
+                chat_store,
+                request.session_id,
+                response_active_plan,
+                expected_revision=active_plan.revision if active_plan else None,
+                user_id=user_id,
+            )
+            agent_result = agent_result.model_copy(
+                update={
+                    "evidence": response_active_plan.selected_places,
+                    "itinerary": response_active_plan.itinerary,
+                }
+            )
     elif (
         active_plan is not None
         and plan_mutation.operation is PlanOperation.NONE
@@ -758,7 +789,24 @@ def handle_chat(
     planning_unavailable = bool(
         orchestration.plan.run_planning and not agent_result.itinerary
     )
-    if planning_unavailable:
+    if replan_unchanged and response_active_plan is not None:
+        synthesis = SynthesisResult(
+            answer=(
+                "Mình đã thử sắp xếp lại nhưng phương án phù hợp nhất vẫn giống "
+                "lịch trình hiện tại, nên chưa tạo revision mới. Bạn có thể nêu "
+                "tiêu chí muốn thay đổi, chẳng hạn thêm một địa điểm, đổi loại "
+                "địa điểm hoặc đổi khung giờ."
+            ),
+            unresolved_tools=[],
+            trace={
+                "node": "answer_synthesizer",
+                "status": "completed",
+                "generator": "plan_noop_guard",
+                "reason": "replan_unchanged",
+                "sources": [],
+            },
+        )
+    elif planning_unavailable:
         warnings = list(
             dict.fromkeys([*agent_result.warnings, "planning_unavailable"])
         )
@@ -825,7 +873,10 @@ def handle_chat(
             itinerary_days=len(agent_result.itinerary),
         ).warning("itinerary.response.guard")
         synthesis = SynthesisResult(
-            answer=_planning_unavailable_answer(response_active_plan),
+            answer=_planning_unavailable_answer(
+                response_active_plan,
+                reason=str(orchestration.planning_trace.get("reason") or "") or None,
+            ),
             unresolved_tools=[],
             trace={
                 "node": "answer_synthesizer",
@@ -925,6 +976,14 @@ def handle_chat(
             response_active_plan.budget_summary if response_active_plan else None
         ),
         nearby_suggestions=nearby_suggestions,
+        planning=_planning_outcome(
+            orchestration.planning_trace,
+            retryable=bool(
+                planning_unavailable
+                and agent_result.error
+                and agent_result.error.get("retryable")
+            ),
+        ),
     )
     _save_message(
         chat_store,
@@ -956,6 +1015,7 @@ def handle_chat(
                 item.model_dump(mode="json") for item in nearby_suggestions
             ],
             "warnings": agent_result.warnings,
+            "planning": response.planning.model_dump(mode="json"),
             "resolved_context": resolved_context,
             "trace": trace,
         },
@@ -1225,19 +1285,51 @@ def _local_plan_answer(plan: ActiveTripPlan, operation: PlanOperation) -> str:
     )
 
 
-def _planning_unavailable_answer(active_plan: ActiveTripPlan | None) -> str:
+def _planning_unavailable_answer(
+    active_plan: ActiveTripPlan | None,
+    *,
+    reason: str | None = None,
+) -> str:
     if active_plan is not None:
         return (
             "Mình chưa thể áp dụng lần sắp xếp mới vì chưa ghép được đầy đủ "
             "địa điểm, giờ hoạt động và lưu trú phù hợp. Lịch trình hiện tại "
             f"revision {active_plan.revision} vẫn được giữ nguyên."
         )
+    if reason == "no_grounded_candidates_in_city":
+        return (
+            "Mình chưa nhận được đủ dữ liệu địa điểm đã xác minh để sắp xếp "
+            "lịch trình ở lần này. Bạn có thể thử lại sau."
+        )
     return (
-        "Mình chưa thể tạo lịch trình theo từng ngày vì chưa ghép được đầy đủ "
-        "địa điểm, giờ hoạt động và khách sạn phù hợp với ngày cùng điều kiện "
-        "thời tiết hiện tại. Bạn có thể đổi ngày hoặc cho phép nới tiêu chí để "
-        "mình lập lại lịch trình."
+        "Mình chưa thể tạo lịch trình theo từng ngày từ các địa điểm và điều "
+        "kiện đã xác minh. Bạn có thể thử lại hoặc điều chỉnh yêu cầu."
     )
+
+
+def _planning_outcome(
+    trace: dict[str, object],
+    *,
+    retryable: bool = False,
+) -> PlanningOutcome:
+    status = str(trace.get("status") or "skipped")
+    if status not in {"skipped", "completed", "needs_input", "unavailable"}:
+        status = "unavailable"
+    return PlanningOutcome(
+        status=status,
+        reason=str(trace.get("reason") or trace.get("missing") or "") or None,
+        retryable=retryable,
+        candidate_count=_optional_nonnegative_int(trace.get("candidate_count")),
+        itinerary_days=_optional_nonnegative_int(trace.get("itinerary_days")),
+    )
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
 
 
 def _get_active_trip_plan(
@@ -1539,6 +1631,25 @@ def _all_slot_ids(plan: ActiveTripPlan) -> list[str]:
         for slot in day_item.get("slots", [])
         if slot.get("slot_id")
     ]
+
+
+def _itinerary_place_signature(itinerary: list[dict]) -> tuple:
+    return tuple(
+        (
+            int(day_item.get("day") or 0),
+            tuple(
+                (
+                    int(slot.get("order") or index),
+                    str(slot.get("place_id") or ""),
+                )
+                for index, slot in enumerate(day_item.get("slots", []), start=1)
+            ),
+        )
+        for day_item in sorted(
+            itinerary,
+            key=lambda item: int(item.get("day") or 0),
+        )
+    )
 
 
 def _resolved_context(context: dict, resolved_turn) -> dict:

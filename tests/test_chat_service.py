@@ -26,6 +26,7 @@ from src.core_ai.nextrip_agent.constants import (
 from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.core_ai.nextrip_agent.graph import run_nextrip_agent
 from src.core_ai.nextrip_agent.nodes.answer import answer_node
+from src.core_ai.nextrip_agent.trip_plan import PlanMutation, PlanOperation
 from src.infra.chat_store import InMemoryChatStore, TripPlanRevisionConflictError
 from src.infra.user_profile_store import InMemoryUserProfileStore
 
@@ -380,6 +381,16 @@ class MissingHotelFollowUpContextualizer:
             route="travel",
             standalone_message="Len lich trinh 2 ngay o Quy Nhon co khach san",
             confidence=1,
+        )
+
+
+class OverbroadReplanContextualizer:
+    def contextualize(self, **kwargs):
+        return ConversationResolution(
+            route="travel",
+            standalone_message=kwargs["message"],
+            confidence=1,
+            plan_mutation=PlanMutation(operation=PlanOperation.REPLAN_ALL),
         )
 
 
@@ -780,6 +791,82 @@ def test_chat_add_move_and_retime_are_local_plan_revisions() -> None:
     assert retimed.itinerary[0].slots[0].start_time == "15:00"
 
 
+def test_generic_add_request_uses_an_unused_candidate_despite_model_replan() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Len lich trinh mot ngay o Quy Nhon",
+            session_id="generic-add",
+            city="Quy Nhon",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert first.active_trip_plan is not None
+
+    added = handle_chat(
+        ChatRequest(
+            message="Th\u00eam \u0111\u1ecba  \u0111i\u1ec3m kh\u00e1c",
+            session_id="generic-add",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8AddCandidateClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+        conversation_contextualizer=OverbroadReplanContextualizer(),
+    )
+
+    assert added.active_trip_plan is not None
+    assert added.active_trip_plan.revision == 2
+    assert added.plan_change is not None
+    assert added.plan_change.operation is PlanOperation.ADD_SLOT
+    assert [slot.place_id for slot in added.itinerary[0].slots] == [
+        "attr_qn_001",
+        "cafe_qn_099",
+    ]
+
+
+def test_identical_replan_does_not_create_a_new_revision() -> None:
+    store = InMemoryChatStore()
+    first = handle_chat(
+        ChatRequest(
+            message="Len lich trinh mot ngay o Quy Nhon",
+            session_id="unchanged-replan",
+            city="Quy Nhon",
+            kb_version="v8",
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+    assert first.active_trip_plan is not None
+
+    second = handle_chat(
+        ChatRequest(
+            message="Sap xep lai lich",
+            session_id="unchanged-replan",
+            kb_version="v8",
+            expected_plan_revision=1,
+        ),
+        FakeV8ItineraryClient(),
+        FakeAnswerGenerator(),
+        chat_store=store,
+    )
+
+    stored = store.get_active_trip_plan("unchanged-replan")
+    assert stored is not None
+    assert stored["revision"] == 1
+    assert second.active_trip_plan is not None
+    assert second.active_trip_plan.revision == 1
+    assert second.plan_change is not None
+    assert second.plan_change.message == "replan_not_applied"
+    assert second.plan_change.changed_slot_ids == []
+    assert "plan_replan_unchanged" in second.warnings
+
+
 def test_replan_day_preserves_other_days_and_their_slot_ids() -> None:
     store = InMemoryChatStore()
     first = handle_chat(
@@ -1114,7 +1201,9 @@ def test_failed_planning_does_not_return_candidates_as_an_itinerary() -> None:
     assert response.active_trip_plan is None
     assert response.evidence == []
     assert "planning_unavailable" in response.warnings
-    assert "theo từng ngày" in response.answer
+    assert response.planning.status == "unavailable"
+    assert response.planning.reason == "fallback_plan_invalid"
+    assert "lịch trình theo từng ngày" in response.answer
     assert "beach_access" not in response.answer
     assert generator.calls == []
 

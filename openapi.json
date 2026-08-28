@@ -1984,6 +1984,9 @@
             },
             "type": "array",
             "title": "Nearby Suggestions"
+          },
+          "planning": {
+            "$ref": "#/components/schemas/PlanningOutcome"
           }
         },
         "type": "object",
@@ -3135,6 +3138,63 @@
           "query_plan"
         ],
         "title": "PlanOperation"
+      },
+      "PlanningOutcome": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "skipped",
+              "completed",
+              "needs_input",
+              "unavailable"
+            ],
+            "title": "Status",
+            "default": "skipped"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "default": false
+          },
+          "candidate_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Count"
+          },
+          "itinerary_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Itinerary Days"
+          }
+        },
+        "type": "object",
+        "title": "PlanningOutcome"
       },
       "PreferenceEvent": {
         "properties": {

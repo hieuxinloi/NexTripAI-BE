@@ -123,6 +123,9 @@ place in replacement_place_name or replacement_query. For move_slot, identify th
 existing slot with target_slot_id and put the new position in destination_day and
 destination_order. For update_time, identify the existing slot and put its new clock
 range in start_time/end_time; day_start_time/day_end_time are whole-plan constraints.
+An explicit request to add another or different place to the active itinerary is
+add_slot even when no place is named; leave replacement_place_name empty so grounded
+discovery can select an unused candidate. Do not classify that request as replan_all.
 
 Write a compact Vietnamese rolling summary of durable user preferences, decisions,
 travel constraints, and the conversation's important outcomes. Do not include secrets,

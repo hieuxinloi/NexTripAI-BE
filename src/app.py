@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     app_settings = settings()
     kb_client = KbClient(
         app_settings.nextrip_kb_base_url,
-        timeout_seconds=app_settings.kb_request_timeout_seconds,
+        timeout_seconds=app_settings.effective_kb_request_timeout_seconds,
         auth_mode=app_settings.kb_auth_mode,
         auth_audience=app_settings.kb_auth_audience,
         retry_attempts=app_settings.resilience_retry_attempts,
