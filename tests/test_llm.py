@@ -388,6 +388,46 @@ def test_grounded_context_exposes_only_sanitized_presentation_attributes() -> No
     assert "false" not in serialized
 
 
+def test_grounded_context_exposes_hotel_price_fallback() -> None:
+    context, _ = _protected_context(
+        question="Giá tiền?",
+        answer_type="entity_detail",
+        evidence=[{
+            "place_id": "hotel_qn_001",
+            "name": "Hotel Test",
+            "city": "Quy Nhon",
+            "entity_type": "hotel",
+            "category": "hotel",
+            "attributes": {
+                "hotel_availability": {
+                    "selected_window_index": None,
+                    "windows": [{
+                        "check_in": "2026-08-29",
+                        "check_out": "2026-08-30",
+                        "lookup_status": "stale",
+                        "availability": "available",
+                        "offers": [{
+                            "seller": "Booking.com",
+                            "currency": "VND",
+                            "nightly_amount": "882000",
+                            "stale": True,
+                            "observed_at": "2026-08-28T14:41:41Z",
+                        }],
+                    }],
+                },
+            },
+        }],
+        facts=[],
+        matched_paths=[],
+    )
+
+    availability = context["retrieved_places"][0]["attributes"][
+        "hotel_availability"
+    ]
+    assert availability["selected_window"]["offers"][0]["nightly_amount"] == "882000"
+    assert availability["selected_window"]["offers"][0]["stale"] is True
+
+
 def test_final_output_guard_translates_known_tokens_and_raw_boolean() -> None:
     assert _guard_presentation_output(
         "Khach san co beach_access va rocky_beach."

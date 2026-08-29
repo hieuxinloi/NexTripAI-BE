@@ -815,6 +815,10 @@ def _presentation_attributes(value: object) -> dict[str, Any]:
             )
         if current_view:
             presented["current"] = current_view
+    availability = value.get("hotel_availability")
+    compact_availability = _compact_hotel_availability(availability)
+    if compact_availability is not None:
+        presented["hotel_availability"] = compact_availability
     return presented
 
 
