@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     answer_generation_mode: str = "template"
     gemini_context_model: str = Field(min_length=1)
     gemini_answer_model: str = Field(min_length=1)
-    gemini_planning_model: str = "gemini-3.6-flash"
+    gemini_planning_model: str = "gemini-flash-latest"
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"]
     gemini_planning_thinking_level: Literal["minimal", "low", "medium", "high"] = (
         "medium"

@@ -131,8 +131,8 @@ CURRENT_DATA_BASE_URL=http://localhost:8020
 CURRENT_DATA_API_KEY=<same value as CURRENT_DATA_API_KEY on the KB runtime>
 WEATHER_PROVIDER=mock
 GOOGLE_API_KEY=your-google-ai-studio-key
-GEMINI_CONTEXT_MODEL=gemini-2.5-flash
-GEMINI_ANSWER_MODEL=gemini-2.5-flash
+GEMINI_CONTEXT_MODEL=gemini-flash-latest
+GEMINI_ANSWER_MODEL=gemini-flash-latest
 GEMINI_THINKING_LEVEL=minimal
 ```
 
