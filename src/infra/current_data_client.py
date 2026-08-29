@@ -101,7 +101,13 @@ class CurrentDataClient:
                 },
                 "children_ages": children_ages or [],
                 "currency": currency,
-                "include_stale": False,
+                # Current Data hides expired observations unless explicitly
+                # requested. The BE answer contract allows a clearly marked
+                # stale price when no fresh quote is available, so request
+                # those observations at this integration boundary. The
+                # service still prefers fresh data and preserves ``stale`` on
+                # fallback offers; this does not alter the five-hour TTL.
+                "include_stale": bool(refresh_if_missing),
                 "refresh_if_missing": effective_refresh,
             },
         )

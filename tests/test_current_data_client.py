@@ -39,6 +39,7 @@ def test_current_data_client_uses_private_contract_and_default_occupancy() -> No
     hotel_payload = __import__("json").loads(hotel_request.content)
     assert hotel_payload["occupancy"] == {"adults": 2, "children": 0, "rooms": 1}
     assert hotel_payload["refresh_if_missing"] is False
+    assert hotel_payload["include_stale"] is True
     assert traffic_request.url.path == "/api/current/traffic/recommendations"
 
 
@@ -62,4 +63,5 @@ def test_single_hotel_can_refresh_on_demand() -> None:
     )
 
     assert captured["refresh_if_missing"] is True
+    assert captured["include_stale"] is True
     assert captured["stay_nights"] == 2
