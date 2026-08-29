@@ -14,6 +14,7 @@ from src.apis.domains.chat.service import (
     _build_clarification,
     _planning_unavailable_answer,
     _record_grounded_place_interest,
+    _resolve_current_data_travel_date,
     _resolve_effective_travel_date,
     handle_chat,
     resolve_top_k,
@@ -94,6 +95,28 @@ def test_numeric_date_without_year_rolls_forward_after_date_has_passed() -> None
     )
 
     assert resolved == date(2027, 8, 28)
+    assert assumed is False
+
+
+def test_undated_live_price_request_uses_today_for_current_data() -> None:
+    resolved, assumed = _resolve_current_data_travel_date(
+        travel_date=None,
+        required_tools=["live_price"],
+        now=datetime(2026, 8, 29, 11, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+    )
+
+    assert resolved == date(2026, 8, 29)
+    assert assumed is True
+
+
+def test_non_price_request_does_not_assume_a_current_data_date() -> None:
+    resolved, assumed = _resolve_current_data_travel_date(
+        travel_date=None,
+        required_tools=["live_status"],
+        now=datetime(2026, 8, 29, 11, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+    )
+
+    assert resolved is None
     assert assumed is False
 
 

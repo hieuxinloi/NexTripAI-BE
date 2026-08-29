@@ -199,6 +199,27 @@ def _resolve_effective_travel_date(
     return reference.date() + timedelta(days=1), True
 
 
+def _resolve_current_data_travel_date(
+    *,
+    travel_date: date | None,
+    required_tools: list[str],
+    now: datetime | None = None,
+) -> tuple[date | None, bool]:
+    """Use today's operational window for an undated hotel-price request."""
+
+    if travel_date is not None:
+        return travel_date, False
+    if not {"booking", "live_price"}.intersection(required_tools):
+        return None, False
+
+    reference = now or datetime.now(_VIETNAM_TIMEZONE)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=_VIETNAM_TIMEZONE)
+    else:
+        reference = reference.astimezone(_VIETNAM_TIMEZONE)
+    return reference.date(), True
+
+
 def _travel_date_from_message(message: str, today: date) -> date | None:
     """Parse an explicit Vietnamese numeric date without confusing trip length."""
 
@@ -466,6 +487,20 @@ def handle_chat(
         longitude=request.longitude,
         conversation_context=kb_conversation_context,
     )
+    current_data_travel_date, current_data_date_assumed = (
+        _resolve_current_data_travel_date(
+            travel_date=effective_travel_date,
+            required_tools=orchestration.graph.required_tools,
+        )
+    )
+    if current_data_date_assumed:
+        logger.bind(
+            event="itinerary.current_data.date_assumed",
+            travel_date=current_data_travel_date.isoformat(),
+            required_tools=orchestration.graph.required_tools,
+        ).info("Current Data hotel date assumed")
+    effective_travel_date = current_data_travel_date
+    travel_date_assumed = travel_date_assumed or current_data_date_assumed
     active_constraints = active_plan.constraints if active_plan is not None else {}
     agent_result, current_data_trace = enrich_current_data(
         orchestration.graph,
