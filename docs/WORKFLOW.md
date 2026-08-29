@@ -133,7 +133,7 @@ WEATHER_PROVIDER=mock
 GOOGLE_API_KEY=your-google-ai-studio-key
 GEMINI_CONTEXT_MODEL=gemini-flash-latest
 GEMINI_ANSWER_MODEL=gemini-flash-latest
-GEMINI_THINKING_LEVEL=minimal
+GEMINI_THINKING_LEVEL=low
 ```
 
 Keep config local-first. Do not add Key Vault/Azure infra for this do an.
