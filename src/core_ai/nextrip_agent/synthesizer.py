@@ -130,20 +130,13 @@ def synthesize_answer(
                     },
                 )
         except Exception as exc:
-            logger.exception(
-                "NexTrip answer synthesis failed error_type={}",
+            logger.warning(
+                "NexTrip answer synthesis failed; using grounded fallback "
+                "error_type={}",
                 exc.__class__.__name__,
             )
-            if has_graph_context:
-                raise AnswerGenerationUnavailableError(
-                    "Gemini answer generation is temporarily unavailable."
-                ) from exc
             fallback_reason = exc.__class__.__name__
         else:
-            if has_graph_context:
-                raise AnswerGenerationUnavailableError(
-                    "Gemini answer generation is temporarily unavailable."
-                )
             fallback_reason = "synthesizer_not_supported"
     else:
         fallback_reason = "llm_not_available_or_context_incomplete"

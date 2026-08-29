@@ -1343,11 +1343,28 @@ def _hotel_cost(value: object, *, stay_nights: int) -> dict[str, Any] | None:
         return None
     windows = value.get("windows")
     selected_index = value.get("selected_window_index")
-    if not isinstance(windows, list) or not isinstance(selected_index, int):
+    if not isinstance(windows, list):
         return None
-    if selected_index < 0 or selected_index >= len(windows):
-        return None
-    window = windows[selected_index]
+    preferred_indexes = (
+        [selected_index]
+        if isinstance(selected_index, int) and 0 <= selected_index < len(windows)
+        else []
+    )
+    preferred_indexes.extend(
+        index for index in range(len(windows)) if index not in preferred_indexes
+    )
+    window = next(
+        (
+            windows[index]
+            for index in preferred_indexes
+            if isinstance(windows[index], Mapping)
+            and any(
+                isinstance(item, Mapping)
+                for item in windows[index].get("offers", [])
+            )
+        ),
+        None,
+    )
     if not isinstance(window, Mapping):
         return None
     offers = [item for item in window.get("offers", []) if isinstance(item, Mapping)]
@@ -1384,6 +1401,7 @@ def _hotel_cost(value: object, *, stay_nights: int) -> dict[str, Any] | None:
         "seller": offer.get("seller"),
         "observed_at": offer.get("observed_at"),
         "stale_after": offer.get("stale_after"),
+        "stale": offer.get("stale"),
         "source": "trivago_current",
         "included_in_budget": True,
     }

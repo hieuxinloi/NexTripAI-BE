@@ -25,6 +25,8 @@ from src.shared.telemetry import record_llm_usage, span
 SYSTEM_INSTRUCTION = """You are the grounded answer synthesizer for NexTripAI.
 Answer in natural Vietnamese using only the supplied GraphRAG and weather context.
 Never invent places, addresses, prices, opening hours, ratings, reasons, or sources.
+When a hotel offer has stale=true, present it only as the latest recorded price,
+include its observed_at time when available, and explicitly warn that it may have changed.
 Place, city, and fact values are protected reference tokens such as [[PLACE_1]], [[CITY_1]], and [[FACT_1]].
 Use every PLACE reference at least once and every FACT reference exactly once. For a single-place answer, mention the PLACE once in the introduction or heading and do not append it to every fact bullet. CITY references are optional. Never alter or explain a token.
 Never create a reference token. Use only reference tokens that exist verbatim in the supplied JSON.
@@ -65,6 +67,19 @@ _PRESENTATION_AMENITY_LABELS = {
     "beach_access": "lối ra biển",
     "rocky_beach": "bãi đá ven biển",
     "is_indoor": "không gian trong nhà",
+}
+
+_PRESENTATION_FACT_LABELS = {
+    "address": "Địa chỉ",
+    "altitude": "Độ cao",
+    "city": "Thành phố",
+    "description": "Thông tin nổi bật",
+    "location": "Tọa độ",
+    "opening_hours": "Giờ mở cửa",
+    "price": "Giá",
+    "rating": "Đánh giá",
+    "review_count": "Số lượt đánh giá",
+    "signature_dishes": "Món đặc trưng",
 }
 
 _PRESENTATION_ATTRIBUTE_FIELDS = (
@@ -531,6 +546,7 @@ class GeminiAnswerGenerator:
             answer_type=answer_type,
             evidence=evidence,
         )
+        raw_answer = _repair_missing_fact_references(raw_answer, context)
         grounded_answer = _guard_presentation_output(
             _restore_references(raw_answer, replacements)
         )
@@ -906,28 +922,55 @@ def _compact_hotel_availability(value: Any) -> dict[str, Any] | None:
     selected_index = value.get("selected_window_index")
     windows = value.get("windows")
     selected = None
+    price_window_index = None
+    if isinstance(windows, list):
+        preferred_indexes = (
+            [selected_index]
+            if isinstance(selected_index, int) and 0 <= selected_index < len(windows)
+            else []
+        )
+        preferred_indexes.extend(
+            index for index in range(len(windows)) if index not in preferred_indexes
+        )
+        for index in preferred_indexes:
+            window = windows[index]
+            if not isinstance(window, dict):
+                continue
+            offers = (
+                window.get("offers")
+                if isinstance(window.get("offers"), list)
+                else []
+            )
+            if any(isinstance(offer, dict) for offer in offers):
+                price_window_index = index
+                break
     if (
-        isinstance(selected_index, int)
+        isinstance(price_window_index, int)
         and isinstance(windows, list)
-        and 0 <= selected_index < len(windows)
-        and isinstance(windows[selected_index], dict)
+        and isinstance(windows[price_window_index], dict)
     ):
-        window = windows[selected_index]
+        window = windows[price_window_index]
         offers = window.get("offers") if isinstance(window.get("offers"), list) else []
         priced = [offer for offer in offers if isinstance(offer, dict)][:3]
         selected = {
             "check_in": window.get("check_in"),
             "check_out": window.get("check_out"),
+            "lookup_status": window.get("lookup_status"),
             "availability": window.get("availability"),
+            "latest_observed_at": window.get("latest_observed_at"),
             "offers": [
                 {
                     key: offer.get(key)
                     for key in (
+                        "seller",
                         "currency",
                         "nightly_amount",
                         "total_amount",
                         "min_amount",
                         "max_amount",
+                        "observed_at",
+                        "stale_after",
+                        "stale",
                     )
                     if offer.get(key) is not None
                 }
@@ -936,6 +979,16 @@ def _compact_hotel_availability(value: Any) -> dict[str, Any] | None:
         }
     return {
         "selected_window_index": selected_index,
+        "price_window_index": price_window_index,
+        "using_stale_fallback": (
+            selected is not None
+            and price_window_index != selected_index
+            and any(
+                offer.get("stale") is True
+                for offer in selected.get("offers", [])
+                if isinstance(offer, dict)
+            )
+        ),
         "selected_window": selected,
     }
 
@@ -954,6 +1007,40 @@ def _ensure_single_entity_reference(
     if reference not in answer:
         return f"{reference}\n{answer}"
     return answer
+
+
+def _repair_missing_fact_references(
+    answer: str,
+    context: dict[str, Any],
+) -> str:
+    """Append verified facts omitted by the model without weakening token checks."""
+
+    missing_facts: list[tuple[str, str]] = []
+    for fact in context.get("verified_facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        reference = fact.get("reference")
+        if not isinstance(reference, str) or answer.count(reference) != 0:
+            continue
+        predicate = str(fact.get("predicate") or "Thông tin")
+        label = _PRESENTATION_FACT_LABELS.get(
+            predicate,
+            predicate.replace("_", " ").strip().capitalize() or "Thông tin",
+        )
+        missing_facts.append((label, reference))
+    if not missing_facts:
+        return answer
+    logger.warning(
+        "Gemini omitted verified fact references; appending grounded fallback "
+        "missing_references={}",
+        [reference for _, reference in missing_facts],
+    )
+    supplement = "\n".join(
+        f"- {label}: {reference}" for label, reference in missing_facts
+    )
+    if not answer.strip():
+        return f"Thông tin đã xác minh:\n{supplement}"
+    return f"{answer.rstrip()}\n\nThông tin bổ sung đã xác minh:\n{supplement}"
 
 
 def _restore_references(answer: str, replacements: dict[str, str]) -> str:

@@ -8,6 +8,7 @@ import httpx
 from loguru import logger
 
 from src.infra.resilience import CircuitBreaker, retry
+from src.shared.logging import safe_text
 from src.shared.request_context import current_request_id
 
 
@@ -155,10 +156,18 @@ class CurrentDataClient:
                 raise TypeError("Current Data response must be a JSON object")
             return payload
         except Exception as exc:
+            status_code = None
+            response_body = None
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                response_body = safe_text(exc.response.text, 500)
             logger.warning(
-                "Current Data request failed path={} error_type={} elapsed_ms={}",
+                "Current Data request failed path={} error_type={} status_code={} "
+                "response_body={} elapsed_ms={}",
                 path,
                 exc.__class__.__name__,
+                status_code,
+                response_body,
                 int((perf_counter() - started_at) * 1000),
             )
             raise

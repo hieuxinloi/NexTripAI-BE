@@ -10,12 +10,48 @@ from src.core_ai.nextrip_agent.conversation import ConversationResolution
 from src.infra.llm import (
     GeminiAnswerGenerator,
     GeminiConversationContextualizer,
+    _compact_hotel_availability,
     _ensure_single_entity_reference,
     _guard_presentation_output,
     _protected_context,
+    _repair_missing_fact_references,
     _restore_references,
 )
 from src.shared import telemetry
+
+
+def test_compact_hotel_availability_exposes_stale_price_fallback() -> None:
+    compact = _compact_hotel_availability(
+        {
+            "selected_window_index": None,
+            "windows": [
+                {
+                    "check_in": "2026-08-29",
+                    "check_out": "2026-08-30",
+                    "lookup_status": "stale",
+                    "availability": "available",
+                    "latest_observed_at": "2026-08-28T14:41:41Z",
+                    "offers": [
+                        {
+                            "seller": "Booking.com",
+                            "currency": "VND",
+                            "nightly_amount": "882000",
+                            "observed_at": "2026-08-28T14:41:41Z",
+                            "stale_after": "2026-08-28T19:41:41Z",
+                            "stale": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert compact is not None
+    assert compact["selected_window_index"] is None
+    assert compact["price_window_index"] == 0
+    assert compact["using_stale_fallback"] is True
+    assert compact["selected_window"]["offers"][0]["nightly_amount"] == "882000"
+    assert compact["selected_window"]["offers"][0]["stale"] is True
 
 
 def test_grounded_context_protects_entity_names_and_fact_values() -> None:
@@ -163,6 +199,37 @@ def test_entity_profile_does_not_hide_empty_model_response() -> None:
 def test_grounded_answer_rejects_missing_reference() -> None:
     with pytest.raises(RuntimeError, match="grounded reference contract"):
         _restore_references("Một câu trả lời không có tên.", {"[[PLACE_1]]": "Mr. Mộc"})
+
+
+def test_missing_fact_references_are_appended_from_verified_context() -> None:
+    repaired = _repair_missing_fact_references(
+        "[[PLACE_1]] là một khách sạn ven biển.",
+        {
+            "verified_facts": [
+                {
+                    "reference": "[[FACT_1]]",
+                    "predicate": "address",
+                },
+                {
+                    "reference": "[[FACT_5]]",
+                    "predicate": "price",
+                },
+            ]
+        },
+    )
+
+    assert repaired.count("[[FACT_1]]") == 1
+    assert repaired.count("[[FACT_5]]") == 1
+    assert "- Địa chỉ: [[FACT_1]]" in repaired
+    assert "- Giá: [[FACT_5]]" in repaired
+    assert _restore_references(
+        repaired,
+        {
+            "[[PLACE_1]]": "Hotel Seagull",
+            "[[FACT_1]]": "489 An Dương Vương",
+            "[[FACT_5]]": "882.000 VND",
+        },
+    ).endswith("- Giá: 882.000 VND")
 
 
 def test_grounded_answer_rejects_unknown_reference() -> None:

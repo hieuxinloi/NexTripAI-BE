@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from src.core_ai.nextrip_agent.current_data import enrich_current_data
+from src.core_ai.nextrip_agent.current_data import (
+    _hotel_result_has_price,
+    enrich_current_data,
+)
 from src.core_ai.nextrip_agent.schemas import AgentResult
 from src.shared.request_context import current_request_id, reset_request_id, set_request_id
 
@@ -110,6 +113,27 @@ class ContextCapturingCurrentData(FakeCurrentData):
     def recommend_transport(self, **kwargs):
         self.route_request_ids.append(current_request_id())
         return super().recommend_transport(**kwargs)
+
+
+def test_stale_hotel_offer_still_satisfies_live_price() -> None:
+    assert _hotel_result_has_price(
+        {
+            "selected_window_index": None,
+            "windows": [
+                {
+                    "lookup_status": "stale",
+                    "availability": "available",
+                    "offers": [
+                        {
+                            "currency": "VND",
+                            "nightly_amount": "882000",
+                            "stale": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
 
 def _graph() -> AgentResult:

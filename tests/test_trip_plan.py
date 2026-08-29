@@ -44,6 +44,39 @@ def test_hotel_cost_keeps_the_selected_stay_dates() -> None:
     assert estimate["fallback_offset_days"] == 1
 
 
+def test_hotel_cost_uses_stale_price_when_no_fresh_window_is_selected() -> None:
+    estimate = _hotel_cost(
+        {
+            "selected_window_index": None,
+            "windows": [
+                {
+                    "requested_check_in": "2026-08-29",
+                    "fallback_offset_days": 0,
+                    "check_in": "2026-08-29",
+                    "check_out": "2026-08-30",
+                    "lookup_status": "stale",
+                    "offers": [
+                        {
+                            "nightly_amount": 882_000,
+                            "currency": "VND",
+                            "seller": "Booking.com",
+                            "observed_at": "2026-08-28T14:41:41Z",
+                            "stale_after": "2026-08-28T19:41:41Z",
+                            "stale": True,
+                        }
+                    ],
+                }
+            ],
+        },
+        stay_nights=1,
+    )
+
+    assert estimate is not None
+    assert estimate["amount_min"] == 882_000
+    assert estimate["stale"] is True
+    assert estimate["observed_at"] == "2026-08-28T14:41:41Z"
+
+
 def _itinerary():
     return [
         {

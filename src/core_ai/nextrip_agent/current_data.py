@@ -621,22 +621,34 @@ def _itinerary_hotel_ids(itinerary: list[dict[str, Any]]) -> list[str]:
 def _hotel_result_has_price(result: object) -> bool:
     if not isinstance(result, Mapping):
         return False
-    selected_index = result.get("selected_window_index")
     windows = result.get("windows")
-    if not isinstance(selected_index, int) or not isinstance(windows, list):
+    if not isinstance(windows, list):
         return False
-    if selected_index < 0 or selected_index >= len(windows):
-        return False
-    selected = windows[selected_index]
-    if not isinstance(selected, Mapping):
-        return False
+    selected_index = result.get("selected_window_index")
+    preferred_indexes = (
+        [selected_index]
+        if isinstance(selected_index, int) and 0 <= selected_index < len(windows)
+        else []
+    )
+    preferred_indexes.extend(
+        index for index in range(len(windows)) if index not in preferred_indexes
+    )
     return any(
-        isinstance(offer, Mapping)
+        isinstance(windows[index], Mapping)
         and any(
-            offer.get(field) is not None
-            for field in ("total_amount", "nightly_amount", "amount", "min_amount")
+            isinstance(offer, Mapping)
+            and any(
+                offer.get(field) is not None
+                for field in (
+                    "total_amount",
+                    "nightly_amount",
+                    "amount",
+                    "min_amount",
+                )
+            )
+            for offer in windows[index].get("offers", [])
         )
-        for offer in selected.get("offers", [])
+        for index in preferred_indexes
     )
 
 

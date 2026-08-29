@@ -619,8 +619,7 @@ def test_synthesizer_marks_weather_forecast_tool_as_resolved() -> None:
     assert result.trace["generator"] == "llm_grounded_combined"
 
 
-@pytest.mark.parametrize("generator", [None, FailingSynthesizer()])
-def test_synthesizer_does_not_render_graph_fallback_without_gemini(generator) -> None:
+def test_synthesizer_requires_configured_gemini_for_graph_context() -> None:
     graph = AgentResult(
         answer="Template answer from Neo4j",
         answer_type="recommendation",
@@ -644,8 +643,38 @@ def test_synthesizer_does_not_render_graph_fallback_without_gemini(generator) ->
             weather=None,
             weather_requested=False,
             weather_trace={"node": "weather", "status": "skipped"},
-            answer_generator=generator,
+            answer_generator=None,
         )
+
+
+def test_synthesizer_uses_grounded_fallback_when_gemini_runtime_fails() -> None:
+    graph = AgentResult(
+        answer="Template answer from Neo4j",
+        answer_type="recommendation",
+        evidence=[
+            {
+                "place_id": "attr_dn_001",
+                "name": "Bãi biển Mỹ Khê",
+                "city": "Đà Nẵng",
+                "entity_type": "attraction",
+            }
+        ],
+    )
+
+    result = synthesize_answer(
+        question="Gợi ý địa điểm ở Đà Nẵng",
+        kb_version="v5",
+        graph=graph,
+        graph_used=True,
+        weather=None,
+        weather_requested=False,
+        weather_trace={"node": "weather", "status": "skipped"},
+        answer_generator=FailingSynthesizer(),
+    )
+
+    assert "Bãi biển Mỹ Khê" in result.answer
+    assert result.trace["status"] == "fallback"
+    assert result.trace["reason"] == "RuntimeError"
 
 
 def test_synthesizer_reports_unavailable_requested_weather() -> None:
