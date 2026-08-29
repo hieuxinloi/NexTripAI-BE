@@ -223,6 +223,67 @@ def resolve_turn(
     return ResolvedTurn(resolution, "completed", "model_decision", message)
 
 
+def should_preserve_named_target_message(
+    *,
+    message: str,
+    standalone_message: str,
+    context: ConversationContext,
+) -> bool:
+    """Avoid applying an inherited city to a newly named venue."""
+
+    if context.city_source not in {"session_metadata", "conversation_history"}:
+        return False
+    if not context.city or _city_in_text(message) is not None:
+        return False
+    if _city_in_text(standalone_message) != context.city:
+        return False
+    normalized = normalize_text(message)
+    if not any(
+        marker in normalized
+        for marker in (
+            "khach san",
+            "hotel",
+            "resort",
+            "nha hang",
+            "quan an",
+            "quan cafe",
+            "quan ca phe",
+            "diem tham quan",
+            "khu du lich",
+        )
+    ):
+        return False
+    generic = {
+        "cho",
+        "toi",
+        "xin",
+        "biet",
+        "thong",
+        "tin",
+        "gia",
+        "phong",
+        "khach",
+        "san",
+        "cua",
+        "ngay",
+        "dem",
+        "vao",
+        "tai",
+        "o",
+        "den",
+        "tu",
+        "goi",
+        "y",
+        "khong",
+        "co",
+        "a",
+    }
+    return any(
+        len(token) >= 3 and token not in generic
+        for token in normalized.split()
+    )
+
+
 def answer_memory_context(
     *,
     history: list[dict[str, Any]],

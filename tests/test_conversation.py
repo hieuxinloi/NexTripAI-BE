@@ -14,6 +14,7 @@ from src.core_ai.nextrip_agent.conversation import (
     ResolvedTurn,
     resolve_conversation_context,
     resolve_turn,
+    should_preserve_named_target_message,
 )
 from src.infra.chat_store import InMemoryChatStore
 from src.infra.weather import DailyForecast
@@ -89,6 +90,28 @@ def test_kb_context_does_not_lock_a_new_turn_to_previous_plan_filters() -> None:
     assert "duration_days" not in payload
     assert "entity_types" not in payload
     assert "previous_recommendations" not in payload
+
+
+def test_named_place_request_does_not_inherit_previous_city() -> None:
+    context = ConversationContext(
+        city="Đà Nẵng",
+        city_source="session_metadata",
+        history_messages=4,
+    )
+
+    assert should_preserve_named_target_message(
+        message="giá khách sạn hải âu ngày 30/8",
+        standalone_message=(
+            "Cho tôi biết giá phòng khách sạn Hải Âu ở Đà Nẵng "
+            "vào ngày 30/08/2026."
+        ),
+        context=context,
+    )
+    assert not should_preserve_named_target_message(
+        message="giá phòng",
+        standalone_message="Cho tôi biết giá phòng khách sạn Hải Âu ở Đà Nẵng.",
+        context=context,
+    )
 
 
 class FakeWeatherClient:

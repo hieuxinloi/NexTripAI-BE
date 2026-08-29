@@ -35,6 +35,7 @@ from src.core_ai.nextrip_agent.conversation import (
     SUPPORTED_CITIES,
     resolve_conversation_context,
     resolve_turn,
+    should_preserve_named_target_message,
 )
 from src.core_ai.nextrip_agent.orchestrator import TravelOrchestrator
 from src.core_ai.nextrip_agent.planning import is_itinerary_request
@@ -316,6 +317,20 @@ def handle_chat(
         prior_summary=str(session_memory.get("summary") or "") or None,
         active_trip_plan=compact_active_plan_context(active_plan),
     )
+    preserve_named_target = should_preserve_named_target_message(
+        message=request.message,
+        standalone_message=resolved_turn.resolution.standalone_message,
+        context=context,
+    )
+    if preserve_named_target:
+        resolved_turn = ResolvedTurn(
+            resolution=resolved_turn.resolution.model_copy(
+                update={"standalone_message": request.message}
+            ),
+            status=resolved_turn.status,
+            reason="preserved_named_target",
+            original_message=resolved_turn.original_message,
+        )
     plan_mutation = resolve_plan_mutation(
         request.message,
         active_plan,
@@ -348,7 +363,7 @@ def handle_chat(
     else:
         graph_message = resolved_turn.resolution.standalone_message
         kb_conversation_context = stored_kb_context
-    effective_city = context.city
+    effective_city = None if preserve_named_target else context.city
     effective_entity_types = request.entity_types
     discovery_target = None
     discovery_anchor = None
